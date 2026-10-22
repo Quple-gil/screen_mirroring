@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-server:
+    name: 后台服务测试
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest -q
+
+  check-patch:
+    name: 检查客户端补丁
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: sm
+
+      - name: Checkout RustDesk 1.5.0
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: "1.5.0"
+          path: rustdesk
+
+      - name: Apply patch
+        working-directory: rustdesk
+        run: git apply --check --verbose ../sm/client/rustdesk-1.5.0-custom.patch

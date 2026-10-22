@@ -14,6 +14,7 @@
 - [配置](#配置)
 - [客户端](#客户端)
 - [运维](#运维)
+- [持续集成与发布](#持续集成与发布)
 - [启用域名 HTTPS](#启用域名-https)
 - [安全说明](#安全说明)
 - [开发](#开发)
@@ -49,6 +50,7 @@
 | `deploy/` | docker compose、RustDesk 服务端镜像、部署脚本、`.env.example` |
 | `client/` | 定制客户端的补丁（`rustdesk-1.5.0-custom.patch`）、编译脚本和说明 |
 | `tests/` | 后台服务测试 |
+| `.github/` | GitHub Actions 流水线：测试、补丁检查、客户端编译与发布 |
 
 以下内容不在仓库中，由 `.gitignore` 排除：
 
@@ -105,7 +107,7 @@
 
 ## 客户端
 
-- **定制客户端**：见 [client/README.md](client/README.md)。包括补丁内容、编译环境和编译方法。
+- **定制客户端**：直接从 [Releases](https://github.com/Quple-gil/screen_mirroring/releases) 下载编译好的通用版，或者按 [client/README.md](client/README.md) 自己编译。自己编译时可以内置服务器地址。
 - **官方客户端**：把官方 RustDesk 客户端改名为 `rustdesk-host=<服务器地址>,key=<公钥>,.exe`，即可使用本服务器并向后台上报，但没有定制功能。
 
 ## 运维
@@ -116,6 +118,24 @@
 | 查看日志 | 在服务器上执行 `cd /opt/screen_mirroring/deploy && docker compose logs --tail 50` |
 | 数据持久化 | 服务器 `deploy/data/`：事件库、自签名证书、RustDesk 密钥与设备库。重新部署不会丢失 |
 | 带宽 | 直连不占服务器带宽；中继按连接限速（hbbr 默认单连接 128 Mbps，长时间大流量降为 32 Mbps） |
+
+## 持续集成与发布
+
+| 流水线 | 触发 | 内容 |
+|---|---|---|
+| `ci.yml` | 推送到 main、Pull Request | 运行后台服务测试，并检查客户端补丁能否打到 RustDesk 1.5.0 上 |
+| `release.yml` | 推送 `v*` 标签，或手动运行 | 给 RustDesk 1.5.0 打补丁，在 Windows 上编译单文件客户端。标签触发时，测试和编译都通过后发布到 Releases，手动运行时安装包在本次运行的 Artifacts 里 |
+
+编译步骤照搬 RustDesk 官方流水线的 Windows x64 部分，第一次运行没有缓存，大约需要 1 到 2 小时。
+
+发布新版本：
+
+```bash
+git tag v1.5.0
+git push origin v1.5.0
+```
+
+发布页上的安装包默认是**通用版**，不内置任何服务器。如果在仓库的 Settings → Secrets and variables → Actions 中设置了 `RD_HOST`、`RD_KEY`（以及可选的 `RD_API`、`RD_RELAY`），流水线会编出内置该服务器的版本。公开仓库的发布页任何人都能下载，内置版会让下载者都能使用你的服务器做中继，所以公开仓库不建议这样做。
 
 ## 启用域名 HTTPS
 
