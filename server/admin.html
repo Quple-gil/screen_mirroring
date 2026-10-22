@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>远程桌面后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='26' height='17' rx='2' fill='%232563eb'/%3E%3Crect x='12' y='24' width='8' height='3' fill='%232563eb'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #f4f5f7; --card: #fff; --text: #1d2129; --muted: #6b7280; --border: #e3e5e9;
+      --primary: #2563eb; --ok: #15803d; --ok-bg: #dcfce7; --warn: #b45309; --warn-bg: #fef3c7; --err: #dc2626;
+      color-scheme: light dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111318; --card: #1a1d24; --text: #e5e7eb; --muted: #9ca3af; --border: #2c313b;
+        --primary: #3b82f6; --ok: #4ade80; --ok-bg: #14532d; --warn: #fbbf24; --warn-bg: #451a03; --err: #f87171;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--border); }
+    header h1 { margin: 0; font-size: 18px; }
+    .live { font-size: 13px; color: var(--muted); }
+    .live::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--muted); vertical-align: 1px; }
+    .live.on::before { background: var(--ok); }
+    .live.off { color: var(--err); }
+    .live.off::before { background: var(--err); }
+    main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 40px; }
+    h2 { margin: 28px 0 12px; font-size: 16px; }
+    .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+    .tile { padding: 14px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+    .tile .label { font-size: 13px; color: var(--muted); }
+    .tile .value { margin-top: 2px; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tile .sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .card { margin-bottom: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .muted { color: var(--muted); }
+    .empty { padding: 20px 16px; color: var(--muted); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 8px 16px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--border); }
+    th { font-weight: 500; font-size: 13px; color: var(--muted); }
+    tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 1px 8px; font-size: 12px; border-radius: 999px; }
+    .badge.direct { color: var(--ok); background: var(--ok-bg); }
+    .badge.relay { color: var(--warn); background: var(--warn-bg); }
+    .badge.offline { color: var(--muted); background: var(--bg); }
+    .kind-reject { color: var(--err); }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; padding: 14px 16px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    code { font: 12px/1.5 ui-monospace, Consolas, monospace; }
+    button { font: inherit; font-size: 12px; margin-left: 8px; padding: 2px 10px; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>远程桌面后台</h1>
+    <span id="live" class="live">加载中…</span>
+  </header>
+  <main>
+    <div class="tiles">
+      <div class="tile"><div class="label">在线设备</div><div class="value" id="tDevices">-</div><div class="sub" id="tDevicesSub"></div></div>
+      <div class="tile"><div class="label">进行中的连接</div><div class="value" id="tSessions">-</div></div>
+      <div class="tile"><div class="label">CPU</div><div class="value" id="tCpu">-</div><div class="sub" id="tLoad"></div></div>
+      <div class="tile"><div class="label">内存</div><div class="value" id="tMem">-</div><div class="sub" id="tMemSub"></div></div>
+      <div class="tile"><div class="label">服务器上行</div><div class="value" id="tTx">-</div><div class="sub">含中继流量</div></div>
+      <div class="tile"><div class="label">服务器下行</div><div class="value" id="tRx">-</div></div>
+    </div>
+
+    <h2>进行中的连接</h2>
+    <div class="card table-wrap">
+      <table>
+        <thead><tr><th>被控设备</th><th>控制方</th><th>类型</th><th>来源 IP</th><th>时长</th></tr></thead>
+        <tbody id="sessions"></tbody>
+      </table>
+    </div>
+
+    <h2>设备</h2>
+    <div class="card table-wrap">
+      <table>
+        <thead><tr><th>状态</th><th>设备 ID</th><th>主机名</th><th>系统</th><th>CPU / 内存</th><th>版本</th><th>IP</th><th>最后在线</th></tr></thead>
+        <tbody id="devices"></tbody>
+      </table>
+    </div>
+
+
+    <h2>最近事件</h2>
+    <div class="card table-wrap">
+      <table>
+        <thead><tr><th>时间</th><th>事件</th><th>设备</th><th>控制方</th><th>IP</th><th>说明</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table>
+    </div>
+
+    <h2>服务器信息</h2>
+    <div class="card"><dl id="info"></dl></div>
+  </main>
+
+  <script>
+    'use strict';
+
+    const $ = (id) => document.getElementById(id);
+    const EVENT_TEXT = {
+      'room-open': '开始分享',
+      'room-close': '停止分享',
+      join: '进入观看',
+      leave: '离开',
+      reject: '口令错误',
+      'rd-connect': '有人连入',
+      'rd-auth': '开始连接',
+      'rd-close': '连接结束',
+    };
+
+    // 用 textContent 拼 DOM：昵称等都是用户填的，不能当 HTML 插入
+    function el(tag, attrs = {}, ...children) {
+      const node = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (key === 'class') node.className = value;
+        else if (key === 'text') node.textContent = value;
+        else node.setAttribute(key, value);
+      }
+      for (const child of children) if (child !== null && child !== undefined) node.append(child);
+      return node;
+    }
+
+    function fmtBytes(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+      return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
+    }
+
+    function fmtBits(bps) {
+      if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mbps`;
+      return `${Math.round(bps / 1e3)} kbps`;
+    }
+
+    function fmtDuration(seconds) {
+      seconds = Math.max(0, Math.floor(seconds));
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      if (d) return `${d}天${h}小时`;
+      if (h) return `${h}小时${m}分`;
+      if (m) return `${m}分${s}秒`;
+      return `${s}秒`;
+    }
+
+    function fmtTime(ts) {
+      const date = new Date(ts * 1000);
+      const pad = (n) => String(n).padStart(2, '0');
+      const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+      return date.toDateString() === new Date().toDateString() ? time : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}`;
+    }
+
+    function renderTiles(data) {
+      const { system, rustdesk } = data;
+      $('tDevices').textContent = rustdesk.online;
+      $('tDevicesSub').textContent = `共 ${rustdesk.devices.length} 台设备`;
+      $('tSessions').textContent = rustdesk.sessions.length;
+      $('tCpu').textContent = `${Math.round(system.cpu_percent)}%`;
+      $('tLoad').textContent = system.load ? `负载 ${system.load.map((x) => x.toFixed(2)).join(' / ')}` : `${system.cpu_count} 核`;
+      $('tMem').textContent = `${Math.round((system.mem_used / system.mem_total) * 100)}%`;
+      $('tMemSub').textContent = `${fmtBytes(system.mem_used)} / ${fmtBytes(system.mem_total)}`;
+      $('tTx').textContent = fmtBits(system.net_tx_bps);
+      $('tRx').textContent = fmtBits(system.net_rx_bps);
+    }
+
+    function emptyRow(colspan, text) {
+      return el('tr', {}, el('td', { class: 'muted', colspan: String(colspan), text }));
+    }
+
+    function renderRustDesk(data) {
+      const now = data.server.now;
+      const { sessions, devices } = data.rustdesk;
+      $('sessions').replaceChildren(...(sessions.length ? sessions.map((s) => el('tr', {},
+        el('td', { text: s.device_name ? `${s.device_name}（${s.device_id}）` : s.device_id }),
+        el('td', { text: s.controller_id ? `${s.controller_name || '未命名'}（${s.controller_id}）` : '—' }),
+        el('td', { text: s.type }),
+        el('td', { text: s.ip }),
+        el('td', { text: fmtDuration(now - s.since) }),
+      )) : [emptyRow(5, '现在没有人在连接')]));
+      $('devices').replaceChildren(...(devices.length ? devices.map((d) => el('tr', {},
+        el('td', {}, el('span', { class: `badge ${d.online ? 'direct' : 'offline'}`, text: d.online ? '在线' : '离线' })),
+        el('td', { text: d.id }),
+        el('td', { text: d.hostname || '—' }),
+        el('td', { text: d.os || '—' }),
+        el('td', { text: [d.cpu, d.memory].filter(Boolean).join(' / ') || '—' }),
+        el('td', { text: d.version || '—' }),
+        el('td', { text: d.ip }),
+        el('td', { text: d.online ? '现在' : `${fmtDuration(now - d.last_seen)}前` }),
+      )) : [emptyRow(8, '还没有设备上报，装好客户端后会自动出现')]));
+    }
+
+    function renderEvents(events) {
+      const body = $('events');
+      body.replaceChildren();
+      if (events.length === 0) {
+        body.append(el('tr', {}, el('td', { class: 'muted', colspan: '6', text: '还没有记录' })));
+        return;
+      }
+      for (const e of events) {
+        body.append(el('tr', {},
+          el('td', { text: fmtTime(e.ts) }),
+          el('td', { class: `kind-${e.kind}`, text: EVENT_TEXT[e.kind] || e.kind }),
+          el('td', { text: e.room || '' }),
+          el('td', { text: e.name || '' }),
+          el('td', { text: e.ip || '' }),
+          el('td', { class: 'muted', text: e.detail || '' }),
+        ));
+      }
+    }
+
+    function renderInfo(data) {
+      const { server, system } = data;
+      const fingerprint = server.tls_fingerprint
+        ? el('span', {}, el('code', { text: server.tls_fingerprint }), copyButton(server.tls_fingerprint))
+        : el('span', { class: 'muted', text: '未启用 HTTPS 或使用的是正式证书' });
+      const rows = [
+        ['版本', server.version],
+        ['服务运行', fmtDuration(server.now - server.started_at)],
+        ['系统开机', fmtDuration(server.now - system.boot_time)],
+        ['磁盘', `${fmtBytes(system.disk_used)} / ${fmtBytes(system.disk_total)}`],
+        ['证书指纹', fingerprint],
+      ];
+      $('info').replaceChildren(...rows.flatMap(([k, v]) => [el('dt', { text: k }), el('dd', {}, v)]));
+    }
+
+    function copyButton(text) {
+      const button = el('button', { type: 'button', text: '复制' });
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = '已复制';
+        } catch {
+          button.textContent = '复制失败';
+        }
+        setTimeout(() => { button.textContent = '复制'; }, 1500);
+      });
+      return button;
+    }
+
+    function setLive(ok, text) {
+      const live = $('live');
+      live.className = `live ${ok ? 'on' : 'off'}`;
+      live.textContent = text;
+    }
+
+    async function refresh() {
+      try {
+        // 用 origin 拼完整地址：地址栏里带了账号（user:pass@host）时相对路径的 fetch 会被浏览器拒绝
+        const response = await fetch(new URL('/admin/api/overview', location.origin), { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        renderTiles(data);
+        renderRustDesk(data);
+        renderEvents(data.events);
+        // 证书指纹那一行有“复制”按钮，内容不变就不重画，免得按钮状态被打断
+        const infoKey = JSON.stringify([data.server.tls_fingerprint, Math.floor(data.server.now / 60)]);
+        if ($('info').dataset.key !== infoKey) {
+          $('info').dataset.key = infoKey;
+          renderInfo(data);
+        }
+        setLive(true, `实时 · 更新于 ${fmtTime(data.server.now)}`);
+      } catch (err) {
+        setLive(false, `连接失败：${err.message}`);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

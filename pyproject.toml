@@ -1,0 +1,9 @@
+[project]
+name = "screen-mirroring"
+version = "0.1.0"
+description = "给小伙伴之间用的跨网络远程看桌面工具"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

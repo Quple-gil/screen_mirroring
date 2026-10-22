@@ -1,0 +1,40 @@
+# 一般在本机运行 deploy\deploy.ps1 一键部署；也可以在服务器上 cd deploy && docker compose up -d --build
+services:
+  app:
+    build:
+      context: ..
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    # host 网络：拿得到访问者的真实 IP，后台也能统计整台服务器（含 RustDesk 中继）的流量
+    network_mode: host
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: ${HTTPS_PORT:-443}
+      TLS_SELF_SIGNED: "1"
+      PUBLIC_HOST: ${PUBLIC_IP}
+      DATA_DIR: /data
+      # RustDesk 客户端默认往 http://<ID服务器>:21114 上报心跳和连接记录，后台靠它显示设备情况
+      RUSTDESK_API_PORT: "21114"
+      RUSTDESK_DB: /data/rustdesk/db_v2.sqlite3
+    volumes:
+      - ./data:/data # 事件记录、证书，以及 hbbs 的设备库（data/rustdesk），重新部署不会丢
+    restart: unless-stopped
+
+  # RustDesk 原生客户端用的服务端。端口：21115-21117/TCP、21116/UDP
+  # -k _ 表示只接受内置了本服务器公钥（data/rustdesk/id_ed25519.pub）的客户端
+  hbbs:
+    build: ./rustdesk
+    network_mode: host
+    volumes:
+      - ./data/rustdesk:/data
+    command: ["hbbs", "-r", "${PUBLIC_IP}:21117", "-k", "_"]
+    restart: unless-stopped
+
+  hbbr:
+    build: ./rustdesk
+    network_mode: host
+    volumes:
+      - ./data/rustdesk:/data
+    command: ["hbbr", "-k", "_"]
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+deploy/.env
+deploy/data/
+deploy/rustdesk/bin/
+/rustdesk/
+/release/
+.claude/
+client/.env
+*.local.md

@@ -1,0 +1,1284 @@
+diff --git a/flutter/lib/common/widgets/toolbar.dart b/flutter/lib/common/widgets/toolbar.dart
+index c3896b0..b4281c7 100644
+--- a/flutter/lib/common/widgets/toolbar.dart
++++ b/flutter/lib/common/widgets/toolbar.dart
+@@ -709,6 +709,93 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
+   ];
+ }
+ 
++// fork: stream resolution / frame rate / priority. The values match OptionMessage.stream_*:
++// 1 is auto, 2 is native, anything else is a fixed height or frame rate.
++const kStreamAuto = '1';
++const kStreamNative = '2';
++const kStreamPriorityFps = '1';
++const kStreamPriorityResolution = '2';
++const _kStreamHeights = [2160, 1440, 1080, 900, 720, 540];
++const _kStreamFps = [240, 165, 144, 120, 90, 60, 30, 15];
++
++Future<String> _streamOption(FFI ffi, String key, String defaultValue) async {
++  final v = await bind.sessionGetOption(sessionId: ffi.sessionId, arg: key);
++  return (v == null || v.isEmpty) ? defaultValue : v;
++}
++
++Future<void> _setStreamOption(FFI ffi, String key, String? value) async {
++  final v = int.tryParse(value ?? '');
++  if (v == null) return;
++  await bind.sessionSetStreamOption(sessionId: ffi.sessionId, key: key, value: v);
++}
++
++Future<List<TRadioMenu<String>>> toolbarStreamResolution(
++    BuildContext context, FFI ffi) async {
++  final groupValue =
++      await _streamOption(ffi, 'stream-resolution', kStreamNative);
++  onChanged(String? v) => _setStreamOption(ffi, 'stream-resolution', v);
++  final display = ffi.ffiModel.pi.tryGetDisplay();
++  final w = display?.width ?? 0;
++  final h = display?.height ?? 0;
++  TRadioMenu<String> radio(String label, String value) => TRadioMenu<String>(
++      child: Text(label),
++      value: value,
++      groupValue: groupValue,
++      onChanged: onChanged);
++  return [
++    radio(translate('Auto (follow network)'), kStreamAuto),
++    radio('${translate('Native')} ($w × $h)', kStreamNative),
++    if (w > 0 && h > 0)
++      for (final height in _kStreamHeights.where((x) => x < h))
++        radio('${(w * height / h).round() & ~1} × $height', '$height'),
++  ];
++}
++
++Future<List<TRadioMenu<String>>> toolbarStreamFps(
++    BuildContext context, FFI ffi) async {
++  final groupValue = await _streamOption(ffi, 'stream-fps', kStreamAuto);
++  onChanged(String? v) => _setStreamOption(ffi, 'stream-fps', v);
++  final refresh = ffi.ffiModel.pi.tryGetDisplay()?.refreshRate ?? 0;
++  final limit = refresh > 0 ? refresh : 60;
++  final choices = {
++    if (refresh > 0) refresh,
++    ..._kStreamFps.where((f) => f <= limit),
++  }.toList()
++    ..sort((a, b) => b.compareTo(a));
++  TRadioMenu<String> radio(String label, String value) => TRadioMenu<String>(
++      child: Text(label),
++      value: value,
++      groupValue: groupValue,
++      onChanged: onChanged);
++  return [
++    radio(
++        refresh > 0
++            ? '${translate('Follow display')} ($refresh Hz)'
++            : translate('Follow display'),
++        kStreamAuto),
++    for (final fps in choices) radio('$fps FPS', '$fps'),
++  ];
++}
++
++Future<List<TRadioMenu<String>>> toolbarStreamPriority(
++    BuildContext context, FFI ffi) async {
++  final groupValue =
++      await _streamOption(ffi, 'stream-priority', kStreamPriorityFps);
++  onChanged(String? v) => _setStreamOption(ffi, 'stream-priority', v);
++  return [
++    TRadioMenu<String>(
++        child: Text(translate('Prefer frame rate')),
++        value: kStreamPriorityFps,
++        groupValue: groupValue,
++        onChanged: onChanged),
++    TRadioMenu<String>(
++        child: Text(translate('Prefer resolution')),
++        value: kStreamPriorityResolution,
++        groupValue: groupValue,
++        onChanged: onChanged),
++  ];
++}
++
+ Future<List<TRadioMenu<String>>> toolbarCodec(
+     BuildContext context, String id, FFI ffi) async {
+   final sessionId = ffi.sessionId;
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 19b3fa9..b270bd7 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -1735,6 +1735,9 @@ class _DisplayMenuState extends State<_DisplayMenu> {
+         viewStyle(customPercent: _customPercent),
+         scrollStyle(state, colorScheme),
+         imageQuality(),
++        streamMenu(translate('Stream resolution'), toolbarStreamResolution),
++        streamMenu(translate('Frame rate'), toolbarStreamFps),
++        streamMenu(translate('When adjusting automatically'), toolbarStreamPriority),
+         codec(),
+         if (ffi.connType == ConnType.defaultConn)
+           _ResolutionsMenu(
+@@ -1957,6 +1960,27 @@ class _DisplayMenuState extends State<_DisplayMenu> {
+         });
+   }
+ 
++  streamMenu(String title,
++      Future<List<TRadioMenu<String>>> Function(BuildContext, FFI) items) {
++    return futureBuilder(
++        future: items(context, ffi),
++        hasData: (data) {
++          final v = data as List<TRadioMenu<String>>;
++          return _SubmenuButton(
++            ffi: widget.ffi,
++            child: Text(title),
++            menuChildren: v
++                .map((e) => RdoMenuButton<String>(
++                    value: e.value,
++                    groupValue: e.groupValue,
++                    onChanged: e.onChanged,
++                    child: e.child,
++                    ffi: ffi))
++                .toList(),
++          );
++        });
++  }
++
+   codec() {
+     return futureBuilder(
+         future: toolbarCodec(context, id, ffi),
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index f1abb8e..1f6dd99 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1627,6 +1627,7 @@ class FfiModel with ChangeNotifier {
+     d.cursorEmbedded = evt['cursor_embedded'] == 1;
+     d.originalWidth = evt['original_width'] ?? kInvalidResolutionValue;
+     d.originalHeight = evt['original_height'] ?? kInvalidResolutionValue;
++    d.refreshRate = evt['refresh_rate'] ?? 0;
+     d._scale = 1.0;
+     final scaledWidth = evt['scaled_width'];
+     if (scaledWidth != null) {
+@@ -4447,6 +4448,7 @@ class Display {
+   bool cursorEmbedded = false;
+   int originalWidth = kInvalidResolutionValue;
+   int originalHeight = kInvalidResolutionValue;
++  int refreshRate = 0;
+   double _scale = 1.0;
+   double get scale => _scale > 1.0 ? _scale : 1.0;
+ 
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index 991e8a3..6a95a47 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -45,6 +45,9 @@ message DisplayInfo {
+   bool cursor_embedded = 7;
+   Resolution original_resolution = 8;
+   double scale = 9;
++  // screen_mirroring fork fields start at 1001 to stay clear of upstream numbering.
++  // Refresh rate of the display in Hz, 0 when unknown.
++  int32 refresh_rate = 1001;
+ }
+ 
+ message PortForward {
+@@ -695,6 +698,23 @@ message OptionMessage {
+   BoolOption disable_camera = 17;
+   BoolOption terminal_persistent = 18;
+   BoolOption show_my_cursor = 19;
++  // screen_mirroring fork fields start at 1001.
++  // Stream (encoded) height chosen by the viewer: 0 not set, 1 auto (adapts to the network),
++  // 2 native, otherwise a fixed height. The display mode of the remote screen is never changed.
++  int32 stream_resolution = 1001;
++  StreamPriority stream_priority = 1002;
++  // Frame rate cap chosen by the viewer: 0 not set, 1 follow the display's refresh rate,
++  // otherwise a fixed frame rate. Unlike custom_fps it does not depend on the image quality mode.
++  int32 stream_fps = 1003;
++}
++
++// What the automatic stream resolution gives up first when the network is congested.
++enum StreamPriority {
++  StreamPriorityNotSet = 0;
++  // Keep the frame rate, lower the resolution.
++  StreamPriorityFps = 1;
++  // Keep the resolution, lower the frame rate.
++  StreamPriorityResolution = 2;
+ }
+ 
+ message TestDelay {
+diff --git a/libs/scrap/src/bindings/yuv_ffi.h b/libs/scrap/src/bindings/yuv_ffi.h
+index 1ea24ef..53c7b62 100644
+--- a/libs/scrap/src/bindings/yuv_ffi.h
++++ b/libs/scrap/src/bindings/yuv_ffi.h
+@@ -3,4 +3,5 @@
+ #include <libyuv/convert_from.h>
+ #include <libyuv/convert_from_argb.h>
+ #include <libyuv/rotate.h>
+-#include <libyuv/rotate_argb.h>
+\ No newline at end of file
++#include <libyuv/rotate_argb.h>
++#include <libyuv/scale_argb.h>
+\ No newline at end of file
+diff --git a/libs/scrap/src/common/convert.rs b/libs/scrap/src/common/convert.rs
+index 40c17e5..813596d 100644
+--- a/libs/scrap/src/common/convert.rs
++++ b/libs/scrap/src/common/convert.rs
+@@ -13,6 +13,34 @@ use hbb_common::{bail, log, ResultType};
+ 
+ generate_call_macro!(call_yuv, false);
+ 
++/// Downscales a 32-bit capture (BGRA / RGBA) into `dst` so it can be encoded at a lower
++/// stream resolution without touching the real display mode.
++#[cfg(not(target_os = "ios"))]
++pub fn scale_32bit(
++    captured: &PixelBuffer,
++    dst_w: usize,
++    dst_h: usize,
++    dst: &mut Vec<u8>,
++) -> ResultType<()> {
++    if captured.pixfmt().bytes_per_pixel() != 4 {
++        bail!("cannot scale pixfmt {:?}", captured.pixfmt());
++    }
++    let dst_stride = dst_w * 4;
++    dst.resize(dst_stride * dst_h, 0);
++    call_yuv!(ARGBScale(
++        captured.data().as_ptr(),
++        captured.stride()[0] as _,
++        captured.width() as _,
++        captured.height() as _,
++        dst.as_mut_ptr(),
++        dst_stride as _,
++        dst_w as _,
++        dst_h as _,
++        FilterMode::kFilterBox,
++    ));
++    Ok(())
++}
++
+ #[cfg(not(target_os = "ios"))]
+ pub fn convert_to_yuv(
+     captured: &PixelBuffer,
+diff --git a/src/client.rs b/src/client.rs
+index d3e66e7..97f3b7e 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -3447,10 +3447,57 @@ impl LoginConfigHandler {
+         if view_only || self.get_toggle_option("disable-clipboard") {
+             msg.disable_clipboard = BoolOption::Yes.into();
+         }
++        self.fill_stream_options(&mut msg);
+         msg.supported_decoding = MessageField::some(self.get_supported_decoding());
+         Some(msg)
+     }
+ 
++    /// fork: stream resolution, frame rate and priority. Resolution defaults to native until
++    /// the client can follow a stream size that differs from the display; the rest default to auto.
++    fn fill_stream_options(&self, msg: &mut OptionMessage) {
++        use hbb_common::protobuf::Enum as _;
++        let get = |k: &str| self.get_option(k).parse::<i32>().unwrap_or(1);
++        msg.stream_resolution = self.get_option("stream-resolution").parse().unwrap_or(2);
++        msg.stream_fps = get("stream-fps");
++        self.apply_stream_fps_cap(msg.stream_fps);
++        msg.stream_priority = StreamPriority::from_i32(get("stream-priority"))
++            .unwrap_or(StreamPriority::StreamPriorityFps)
++            .into();
++    }
++
++    /// fork: the client-side frame pacing (io_loop) caps the stream at `custom_fps`, 30 by
++    /// default; follow the stream frame rate instead. "Follow display" (1) leaves the cap to the
++    /// controlled side, which knows the refresh rate.
++    fn apply_stream_fps_cap(&self, stream_fps: i32) {
++        let cap = if stream_fps > 1 { stream_fps as usize } else { 240 };
++        *self.custom_fps.lock().unwrap() = Some(cap);
++    }
++
++    /// fork: changes one stream option for this session and remembers it for the peer.
++    pub fn set_stream_option(&mut self, key: &str, value: i32) -> Message {
++        use hbb_common::protobuf::Enum as _;
++        let mut option = OptionMessage::default();
++        match key {
++            "stream-resolution" => option.stream_resolution = value,
++            "stream-fps" => {
++                option.stream_fps = value;
++                self.apply_stream_fps_cap(value);
++            }
++            "stream-priority" => {
++                option.stream_priority = StreamPriority::from_i32(value).unwrap_or_default().into()
++            }
++            _ => log::warn!("unknown stream option {key}"),
++        }
++        let mut config = self.load_config();
++        config.options.insert(key.to_owned(), value.to_string());
++        self.save_config(config);
++        let mut misc = Misc::new();
++        misc.set_option(option);
++        let mut msg_out = Message::new();
++        msg_out.set_misc(misc);
++        msg_out
++    }
++
+     pub fn get_supported_decoding(&self) -> SupportedDecoding {
+         Decoder::supported_decodings(
+             Some(&self.id),
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index fcbc090..a936587 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -1389,7 +1389,7 @@ impl<T: InvokeUiSession> Remote<T> {
+         let custom_fps = self.handler.lc.read().unwrap().custom_fps.clone();
+         let custom_fps = custom_fps.lock().unwrap().clone();
+         let mut custom_fps = custom_fps.unwrap_or(30);
+-        if custom_fps < 5 || custom_fps > 120 {
++        if custom_fps < 5 || custom_fps > 240 {
+             custom_fps = 30;
+         }
+         let inactive_threshold = 15;
+diff --git a/src/common.rs b/src/common.rs
+index 0d46baf..99906d4 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -1210,7 +1210,10 @@ pub fn get_local_option(key: &str) -> String {
+         || key == keys::OPTION_ENABLE_WEBRTC
+     {
+         if v.is_empty() {
+-            if !is_public(&Config::get_rendezvous_server()) {
++            // fork: our own hbbs is up to date, so keep the direct paths on for the built-in server
++            if !is_public(&Config::get_rendezvous_server())
++                && crate::custom_server::builtin_custom_server().is_none()
++            {
+                 return "N".to_owned();
+             }
+         }
+diff --git a/src/custom_server.rs b/src/custom_server.rs
+index 3a7d60f..6cc42d4 100644
+--- a/src/custom_server.rs
++++ b/src/custom_server.rs
+@@ -21,6 +21,21 @@ pub struct CustomServer {
+     pub relay: String,
+ }
+ 
++/// Server baked in at build time (RD_HOST / RD_KEY / RD_API / RD_RELAY), used when the
++/// executable name carries no `host=` config, so the client works without being renamed.
++pub fn builtin_custom_server() -> Option<CustomServer> {
++    let host = option_env!("RD_HOST").unwrap_or_default();
++    if host.is_empty() {
++        return None;
++    }
++    Some(CustomServer {
++        host: host.to_owned(),
++        key: option_env!("RD_KEY").unwrap_or_default().to_owned(),
++        api: option_env!("RD_API").unwrap_or_default().to_owned(),
++        relay: option_env!("RD_RELAY").unwrap_or_default().to_owned(),
++    })
++}
++
+ fn get_custom_server_from_config_string(s: &str) -> ResultType<CustomServer> {
+     let tmp: String = s.chars().rev().collect();
+     const PK: &[u8; 32] = &[
+diff --git a/src/flutter.rs b/src/flutter.rs
+index 35fa8cc..cd2066d 100644
+--- a/src/flutter.rs
++++ b/src/flutter.rs
+@@ -618,6 +618,7 @@ impl FlutterHandler {
+             h.insert("width", d.width);
+             h.insert("height", d.height);
+             h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
++            h.insert("refresh_rate", d.refresh_rate);
+             if let Some(original_resolution) = d.original_resolution.as_ref() {
+                 h.insert("original_width", original_resolution.width);
+                 h.insert("original_height", original_resolution.height);
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index f9cc2d6..6875e0e 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -570,6 +570,12 @@ pub fn session_set_custom_image_quality(session_id: SessionID, value: i32) {
+     }
+ }
+ 
++pub fn session_set_stream_option(session_id: SessionID, key: String, value: i32) {
++    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
++        session.set_stream_option(key, value);
++    }
++}
++
+ pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
+     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+         session.set_custom_fps(fps);
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 1ac1ede..4183e97 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -780,6 +780,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("RustDesk could not load a GStreamer component needed for screen capture ({})", "RustDesk 无法加载屏幕捕获所需的 GStreamer 组件 ({})"),
+         ("Relay fallback delay in seconds", "回落到中继前的等待时间（秒）"),
+         ("relay-fallback-delay-tip", "已经建立的中继连接会等待直连的 WebRTC 多久，超过这个时间就改用中继。调大可以让较慢的直连有更多机会胜出；调小则在无法直连的网络上更快回落到中继。留空表示使用默认值 2.5 秒。"),
+-        ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", "开始语音通话前请在\"仅共享屏幕\"页面启用\"音频录制\"。")
++        ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", "开始语音通话前请在\"仅共享屏幕\"页面启用\"音频录制\"。"),
++        ("Stream resolution", "传输分辨率"),
++        ("Frame rate", "帧率"),
++        ("When adjusting automatically", "自动调整时优先"),
++        ("Auto (follow network)", "自动（根据网络调整）"),
++        ("Native", "原始"),
++        ("Follow display", "跟随屏幕刷新率"),
++        ("Prefer frame rate", "优先刷新率（更流畅）"),
++        ("Prefer resolution", "优先分辨率（更清晰）")
+     ].iter().cloned().collect();
+ }
+diff --git a/src/lang/template.rs b/src/lang/template.rs
+index 968e43b..24d0739 100644
+--- a/src/lang/template.rs
++++ b/src/lang/template.rs
+@@ -780,6 +780,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("RustDesk could not load a GStreamer component needed for screen capture ({})", ""),
+         ("Relay fallback delay in seconds", ""),
+         ("relay-fallback-delay-tip", ""),
+-        ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", "")
++        ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", ""),
++        ("Stream resolution", ""),
++        ("Frame rate", ""),
++        ("When adjusting automatically", ""),
++        ("Auto (follow network)", ""),
++        ("Native", ""),
++        ("Follow display", ""),
++        ("Prefer frame rate", ""),
++        ("Prefer resolution", "")
+     ].iter().cloned().collect();
+ }
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index a3c3d68..57147d5 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -2107,6 +2107,7 @@ pub fn get_license_from_exe_name() -> ResultType<CustomServer> {
+         exe = portable_exe;
+     }
+     get_custom_server_from_string(&exe)
++        .or_else(|err| crate::custom_server::builtin_custom_server().ok_or(err))
+ }
+ 
+ // We can't directly use `RegKey::set_value` to update the registry value, because it will fail with `ERROR_ACCESS_DENIED`
+@@ -3063,6 +3064,24 @@ pub fn current_resolution(name: &str) -> ResultType<Resolution> {
+     }
+ }
+ 
++/// Current refresh rate of the display in Hz; 0 when unknown (Windows reports 0/1 for
++/// "hardware default").
++pub fn current_refresh_rate(name: &str) -> u32 {
++    let device_name = str_to_device_name(name);
++    unsafe {
++        let mut dm: DEVMODEW = std::mem::zeroed();
++        dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
++        if EnumDisplaySettingsW(device_name.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) == 0 {
++            return 0;
++        }
++        if dm.dmDisplayFrequency > 1 {
++            dm.dmDisplayFrequency
++        } else {
++            0
++        }
++    }
++}
++
+ pub(super) fn change_resolution_directly(
+     name: &str,
+     width: usize,
+diff --git a/src/server.rs b/src/server.rs
+index 8834163..d1a02f0 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -75,6 +75,8 @@ pub mod display_service;
+ #[cfg(windows)]
+ pub mod portable_service;
+ mod service;
++mod local_mouse;
++mod stream_scale;
+ mod video_qos;
+ pub mod video_service;
+ 
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 7f31832..b82115f 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -4879,6 +4879,24 @@ impl Connection {
+                 .unwrap()
+                 .user_custom_fps(self.inner.id(), o.custom_fps as _);
+         }
++        if o.stream_resolution > 0 {
++            video_service::VIDEO_QOS
++                .lock()
++                .unwrap()
++                .user_stream_resolution(self.inner.id(), o.stream_resolution);
++        }
++        if let Some(fps) = super::stream_scale::stream_fps(o.stream_fps) {
++            video_service::VIDEO_QOS
++                .lock()
++                .unwrap()
++                .user_custom_fps(self.inner.id(), fps);
++        }
++        if o.stream_priority.value() > 0 {
++            video_service::VIDEO_QOS
++                .lock()
++                .unwrap()
++                .user_stream_priority(self.inner.id(), o.stream_priority.value());
++        }
+         if let Some(q) = o.supported_decoding.clone().take() {
+             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
+         }
+diff --git a/src/server/display_service.rs b/src/server/display_service.rs
+index d3fbea1..2a1ccb3 100644
+--- a/src/server/display_service.rs
++++ b/src/server/display_service.rs
+@@ -865,6 +865,7 @@ pub(super) fn update_sync_displays(all: &Vec<Display>) -> Vec<DisplayInfo> {
+                 ((d.width() as f64) / scale).round() as usize,
+                 (d.height() as f64 / scale).round() as usize,
+             );
++            let refresh_rate = display_refresh_rate(&display_name);
+             DisplayInfo {
+                 x: d.origin().0 as _,
+                 y: d.origin().1 as _,
+@@ -875,6 +876,7 @@ pub(super) fn update_sync_displays(all: &Vec<Display>) -> Vec<DisplayInfo> {
+                 cursor_embedded: false,
+                 original_resolution,
+                 scale,
++                refresh_rate,
+                 ..Default::default()
+             }
+         })
+@@ -883,6 +885,13 @@ pub(super) fn update_sync_displays(all: &Vec<Display>) -> Vec<DisplayInfo> {
+     displays
+ }
+ 
++fn display_refresh_rate(_name: &str) -> i32 {
++    #[cfg(windows)]
++    return crate::platform::windows::current_refresh_rate(_name) as _;
++    #[cfg(not(windows))]
++    0
++}
++
+ pub fn is_inited_msg() -> Option<Message> {
+     #[cfg(target_os = "linux")]
+     if !is_x11() {
+diff --git a/src/server/input_service.rs b/src/server/input_service.rs
+index 515e0eb..2b677fb 100644
+--- a/src/server/input_service.rs
++++ b/src/server/input_service.rs
+@@ -358,6 +358,7 @@ fn run_pos(sp: EmptyExtraFieldService, state: &mut StatePos) -> ResultType<()> {
+     if x == INVALID_CURSOR_POS || y == INVALID_CURSOR_POS {
+         return Ok(());
+     }
++    let (x, y) = super::stream_scale::to_stream_pos(x, y);
+ 
+     if state.is_moved(x, y) {
+         let mut msg_out = Message::new();
+@@ -906,7 +907,10 @@ pub fn handle_mouse(
+         return;
+     }
+     #[cfg(windows)]
+-    crate::portable_service::client::handle_mouse(evt, conn, username, argb, simulate, show_cursor);
++    {
++        let evt = super::stream_scale::to_native_event(evt);
++        crate::portable_service::client::handle_mouse(&evt, conn, username, argb, simulate, show_cursor);
++    }
+     #[cfg(not(windows))]
+     handle_mouse_(evt, conn, username, argb, simulate, show_cursor);
+ }
+@@ -1278,6 +1282,9 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
+     if !active_mouse_(conn) {
+         return;
+     }
++    if super::local_mouse::yield_to_local_user(evt) {
++        return;
++    }
+ 
+     if EXITING.load(Ordering::SeqCst) {
+         return;
+diff --git a/src/server/local_mouse.rs b/src/server/local_mouse.rs
+new file mode 100644
+index 0000000..4afa6b6
+--- /dev/null
++++ b/src/server/local_mouse.rs
+@@ -0,0 +1,104 @@
++//! Local mouse priority (screen_mirroring fork).
++//!
++//! When the person at the controlled computer uses their own mouse, viewers' mouse input is
++//! ignored until that mouse has been still for a moment, so the two never fight over the one
++//! system cursor. Upstream's position-based check (`active_mouse_`) is disabled because it
++//! blocked and dropped fast moves; here a low-level mouse hook tells real input from injected
++//! (remote) input by `LLMHF_INJECTED`, and only records a timestamp, so nothing waits on it.
++
++use base::message_proto::MouseEvent;
++
++/// How long viewers' mouse input stays ignored after the local mouse last moved.
++#[cfg(windows)]
++const QUIET_MS: u64 = 800;
++
++/// Whether this viewer mouse event must be dropped because the local user is using the mouse.
++/// Button releases always pass, so a viewer's drag cut short never leaves a button held down.
++pub fn yield_to_local_user(evt: &MouseEvent) -> bool {
++    use crate::input::{MOUSE_TYPE_MASK, MOUSE_TYPE_UP};
++    evt.mask & MOUSE_TYPE_MASK != MOUSE_TYPE_UP && local_mouse_recently_used()
++}
++
++#[cfg(windows)]
++fn local_mouse_recently_used() -> bool {
++    imp::ensure_hook();
++    let last = imp::LAST_LOCAL_MS.load(std::sync::atomic::Ordering::Relaxed);
++    last != 0 && imp::now_ms().saturating_sub(last) < QUIET_MS
++}
++
++#[cfg(not(windows))]
++fn local_mouse_recently_used() -> bool {
++    false
++}
++
++#[cfg(windows)]
++mod imp {
++    use hbb_common::{lazy_static, log};
++    use std::{
++        io::Error,
++        sync::{
++            atomic::{AtomicU64, Ordering},
++            Once,
++        },
++        time::Instant,
++    };
++    use winapi::{
++        shared::minwindef::{HMODULE, LPARAM, LRESULT, WPARAM},
++        um::{libloaderapi::GetModuleHandleExA, winuser::*},
++    };
++
++    const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 2;
++    const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 4;
++
++    /// Milliseconds (+1, so 0 means "never") since `BASE` of the last real local mouse event.
++    pub static LAST_LOCAL_MS: AtomicU64 = AtomicU64::new(0);
++    static HOOK: Once = Once::new();
++
++    lazy_static::lazy_static! {
++        static ref BASE: Instant = Instant::now();
++    }
++
++    pub fn now_ms() -> u64 {
++        BASE.elapsed().as_millis() as u64 + 1
++    }
++
++    unsafe extern "system" fn hook_mouse(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
++        if code >= 0 {
++            let info = &*(l_param as *const MSLLHOOKSTRUCT);
++            if info.flags & LLMHF_INJECTED == 0 {
++                LAST_LOCAL_MS.store(now_ms(), Ordering::Relaxed);
++            }
++        }
++        CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
++    }
++
++    /// Starts the hook thread once, in whichever process injects the viewers' input (the server,
++    /// or the portable service when that is running).
++    pub fn ensure_hook() {
++        HOOK.call_once(|| {
++            let _ = now_ms();
++            std::thread::spawn(|| unsafe {
++                let mut module: HMODULE = std::ptr::null_mut();
++                if GetModuleHandleExA(
++                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                    hook_mouse as _,
++                    &mut module,
++                ) == 0
++                {
++                    log::warn!("local mouse priority off: GetModuleHandleExA, {}", Error::last_os_error());
++                    return;
++                }
++                let hook = SetWindowsHookExA(WH_MOUSE_LL, Some(hook_mouse), module, 0);
++                if hook.is_null() {
++                    log::warn!("local mouse priority off: SetWindowsHookExA, {}", Error::last_os_error());
++                    return;
++                }
++                log::info!("local mouse priority on");
++                // Low-level hooks are called on this thread's message loop.
++                let mut msg: MSG = std::mem::zeroed();
++                while GetMessageA(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
++                UnhookWindowsHookEx(hook);
++            });
++        });
++    }
++}
+diff --git a/src/server/stream_scale.rs b/src/server/stream_scale.rs
+new file mode 100644
+index 0000000..d53c764
+--- /dev/null
++++ b/src/server/stream_scale.rs
+@@ -0,0 +1,400 @@
++//! Stream resolution (screen_mirroring fork).
++//!
++//! A viewer can pick a fixed stream height or "auto". Auto steps the encoded resolution down
++//! when the network is congested and back up when it recovers; the viewer's priority decides
++//! whether the frame rate or the resolution is given up first. Only the encoder input is
++//! scaled, so the shared screen's display mode never changes under the person using it.
++
++use super::video_qos::{VideoQoS, MAX_FPS, MIN_FPS};
++use base::message_proto::{Message, MouseEvent};
++use hbb_common::{bail, log, ResultType};
++use scrap::{codec::EncoderCfg, Frame, PixelBuffer, Pixfmt, TraitPixelBuffer};
++use std::{
++    borrow::Cow,
++    collections::HashMap,
++    sync::Mutex,
++    time::{Duration, Instant},
++};
++
++/// `OptionMessage.stream_resolution` values besides a fixed height.
++pub const AUTO: i32 = 1;
++pub const NATIVE: i32 = 2;
++const LADDER: [usize; 6] = [2160, 1440, 1080, 900, 720, 540];
++const STEP_COOLDOWN: Duration = Duration::from_secs(10);
++// Delay replies arrive about once a second.
++const DOWN_SAMPLES: u32 = 3;
++const UP_SAMPLES: u32 = 10;
++const MIN_FPS_FOR_RESOLUTION_PRIORITY: u32 = 10;
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
++pub enum Priority {
++    #[default]
++    Fps,
++    Resolution,
++}
++
++#[derive(Debug, Default, Clone)]
++pub struct UserStream {
++    /// 0 (not set, native), `AUTO`, `NATIVE`, or a fixed stream height.
++    resolution: i32,
++    priority: Priority,
++    /// Auto mode: 0 is native, n is the n-th step down the ladder.
++    level: usize,
++    bad: u32,
++    good: u32,
++    changed_at: Option<Instant>,
++}
++
++impl UserStream {
++    pub fn set_resolution(&mut self, resolution: i32) {
++        if resolution != self.resolution {
++            *self = Self {
++                resolution,
++                priority: self.priority,
++                ..Default::default()
++            };
++        }
++    }
++
++    pub fn set_priority(&mut self, priority: i32) {
++        use base::message_proto::StreamPriority;
++        use hbb_common::protobuf::Enum as _;
++        if priority == StreamPriority::StreamPriorityResolution.value() {
++            self.priority = Priority::Resolution;
++        } else if priority == StreamPriority::StreamPriorityFps.value() {
++            self.priority = Priority::Fps;
++        }
++    }
++
++    /// Feeds one network-delay reply; `fps` is what the delay controller just picked for this
++    /// viewer and `cap` the frame rate the viewer asked for.
++    pub fn on_delay(&mut self, avg_delay: u32, fps: u32, cap: u32, now: Instant) {
++        if self.resolution != AUTO {
++            return;
++        }
++        let congested = match self.priority {
++            // Lower the resolution before the frame rate falls under 60% of what was asked.
++            Priority::Fps => fps * 10 < cap * 6,
++            // Hold the resolution until even a low frame rate cannot be kept.
++            Priority::Resolution => fps < MIN_FPS_FOR_RESOLUTION_PRIORITY.min(cap),
++        };
++        let healthy = avg_delay < 50 && fps >= cap;
++        if congested {
++            self.bad += 1;
++            self.good = 0;
++        } else if healthy {
++            self.good += 1;
++            self.bad = 0;
++        } else {
++            self.bad = 0;
++            self.good = 0;
++        }
++        if self
++            .changed_at
++            .map(|t| now.saturating_duration_since(t) < STEP_COOLDOWN)
++            .unwrap_or(false)
++        {
++            return;
++        }
++        let new_level = if self.bad >= DOWN_SAMPLES && self.level < LADDER.len() {
++            self.level + 1
++        } else if self.good >= UP_SAMPLES && self.level > 0 {
++            self.level - 1
++        } else {
++            return;
++        };
++        log::info!(
++            "stream resolution level {} -> {new_level} (avg_delay={avg_delay}, fps={fps}/{cap}, {:?})",
++            self.level,
++            self.priority
++        );
++        self.level = new_level;
++        self.bad = 0;
++        self.good = 0;
++        self.changed_at = Some(now);
++    }
++
++    /// Stream height wanted for a display of native height `native_h`; `None` keeps native.
++    fn height(&self, native_h: usize) -> Option<usize> {
++        let height = match self.resolution {
++            0 | NATIVE => return None,
++            AUTO => {
++                if self.level == 0 {
++                    return None;
++                }
++                let ladder: Vec<usize> = LADDER.iter().copied().filter(|&h| h < native_h).collect();
++                *ladder.get(self.level - 1).or(ladder.last())?
++            }
++            h if h > 0 => h as usize,
++            _ => return None,
++        };
++        (height < native_h).then_some(height)
++    }
++}
++
++/// Frame rate cap for `OptionMessage.stream_fps`; `AUTO` follows the fastest display.
++pub fn stream_fps(value: i32) -> Option<u32> {
++    let fps = match value {
++        v if v <= 0 => return None,
++        AUTO => max_refresh_rate().unwrap_or(60),
++        v => v as u32,
++    };
++    Some(fps.clamp(MIN_FPS, MAX_FPS))
++}
++
++fn max_refresh_rate() -> Option<u32> {
++    #[cfg(windows)]
++    {
++        let displays = super::display_service::try_get_displays().ok()?;
++        displays
++            .iter()
++            .map(|d| crate::platform::windows::current_refresh_rate(&d.name()))
++            .max()
++            .filter(|&r| r > 0)
++    }
++    #[cfg(not(windows))]
++    None
++}
++
++/// The smallest stream height any viewer needs, since all viewers share one encoder.
++pub fn target_height<'a>(users: impl Iterator<Item = &'a UserStream>, native_h: usize) -> Option<usize> {
++    users.filter_map(|u| u.height(native_h)).min()
++}
++
++/// Encoded size for a display of `native` size, or `None` to encode at native size.
++pub fn target_size(qos: &VideoQoS, native: (usize, usize)) -> Option<(usize, usize)> {
++    let (w, h) = native;
++    let target_h = qos.stream_height(h)?;
++    // Even sizes keep every encoder and the 4:2:0 conversion happy.
++    let scaled_w = ((w * target_h + h / 2) / h) & !1;
++    Some((scaled_w.max(2), (target_h & !1).max(2)))
++}
++
++/// Points the encoder config at the scaled size. VRAM encoders take the capture texture as-is,
++/// so a scaled stream uses the CPU-side hardware encoder (or VP9) instead.
++pub fn rescale_config(cfg: EncoderCfg, (width, height): (usize, usize)) -> EncoderCfg {
++    match cfg {
++        #[cfg(feature = "vram")]
++        EncoderCfg::VRAM(vram) => {
++            #[cfg(feature = "hwcodec")]
++            if let Some(hw) = scrap::hwcodec::HwRamEncoder::try_get(scrap::codec::Encoder::negotiated_codec()) {
++                return EncoderCfg::HWRAM(scrap::hwcodec::HwRamEncoderConfig {
++                    name: hw.name,
++                    mc_name: hw.mc_name,
++                    width,
++                    height,
++                    quality: vram.quality,
++                    keyframe_interval: vram.keyframe_interval,
++                });
++            }
++            EncoderCfg::VPX(scrap::vpxcodec::VpxEncoderConfig {
++                width: width as _,
++                height: height as _,
++                quality: vram.quality,
++                codec: scrap::vpxcodec::VpxVideoCodecId::VP9,
++                keyframe_interval: vram.keyframe_interval,
++            })
++        }
++        #[cfg(feature = "hwcodec")]
++        EncoderCfg::HWRAM(mut c) => {
++            c.width = width;
++            c.height = height;
++            EncoderCfg::HWRAM(c)
++        }
++        EncoderCfg::VPX(mut c) => {
++            c.width = width as _;
++            c.height = height as _;
++            EncoderCfg::VPX(c)
++        }
++        EncoderCfg::AOM(mut c) => {
++            c.width = width as _;
++            c.height = height as _;
++            EncoderCfg::AOM(c)
++        }
++        #[allow(unreachable_patterns)]
++        other => other,
++    }
++}
++
++/// Scales a captured frame down to the stream size before color conversion.
++pub fn scale_frame<'a>(
++    frame: Frame<'a>,
++    target: Option<(usize, usize)>,
++    buf: &'a mut Vec<u8>,
++) -> ResultType<Frame<'a>> {
++    let Some((width, height)) = target else {
++        return Ok(frame);
++    };
++    match frame {
++        Frame::PixelBuffer(captured) => {
++            if (captured.width(), captured.height()) == (width, height) {
++                return Ok(Frame::PixelBuffer(captured));
++            }
++            let pixfmt: Pixfmt = captured.pixfmt();
++            scrap::scale_32bit(&captured, width, height, buf)?;
++            let scaled: &'a Vec<u8> = buf;
++            Ok(Frame::PixelBuffer(PixelBuffer::new(scaled, pixfmt, width, height)))
++        }
++        Frame::Texture(_) => bail!("texture frames cannot be scaled"),
++    }
++}
++
++// Viewers size their decoder, texture and mouse mapping from the display size they were told,
++// and drop or misplace frames of any other size. So while a display's stream is scaled they are
++// told the stream size, and mouse / cursor positions are translated between the two sizes.
++
++#[derive(Clone, Copy, Debug)]
++struct Scaled {
++    origin: (i32, i32),
++    native: (usize, usize),
++    stream: (usize, usize),
++}
++
++lazy_static::lazy_static! {
++    // Keyed by video service name, so a camera never picks up a monitor's entry.
++    static ref SCALED: Mutex<HashMap<String, (usize, Scaled)>> = Default::default();
++}
++
++/// Records the size the monitor service `name` now encodes `display_idx` at. Returns the
++/// display-changed message for its current viewers when that differs from what they were told.
++pub fn update_display(
++    name: &str,
++    display_idx: usize,
++    origin: (i32, i32),
++    native: (usize, usize),
++    stream: Option<(usize, usize)>,
++) -> Option<Message> {
++    let mut scaled = SCALED.lock().unwrap();
++    let before = scaled.get(name).map(|(_, s)| s.stream).unwrap_or(native);
++    match stream {
++        Some(stream) => scaled.insert(name.to_owned(), (display_idx, Scaled { origin, native, stream })),
++        None => scaled.remove(name),
++    };
++    drop(scaled);
++    let shown = stream.unwrap_or(native);
++    if before == shown {
++        return None;
++    }
++    log::info!("display {display_idx} is shown to viewers as {}x{}", shown.0, shown.1);
++    display_changed_msg(display_idx, shown)
++}
++
++/// What a viewer joining the service `name` must be told before its first frame of a scaled stream.
++pub fn scaled_display_msg(name: &str) -> Option<Message> {
++    let (display_idx, scaled) = *SCALED.lock().unwrap().get(name)?;
++    display_changed_msg(display_idx, scaled.stream)
++}
++
++fn display_changed_msg(display_idx: usize, (width, height): (usize, usize)) -> Option<Message> {
++    let mut display = super::display_service::get_display_info(display_idx)?;
++    display.width = width as _;
++    display.height = height as _;
++    super::video_service::make_display_changed_msg(
++        display_idx,
++        Some(display),
++        super::video_service::VideoSource::Monitor,
++    )
++}
++
++/// A viewer's mouse event, moved from the scaled display it was shown back onto the desktop.
++pub fn to_native_event(evt: &MouseEvent) -> Cow<'_, MouseEvent> {
++    use crate::input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE};
++    if evt.mask & MOUSE_TYPE_MASK == MOUSE_TYPE_MOVE_RELATIVE {
++        return Cow::Borrowed(evt);
++    }
++    match map_point(evt.x, evt.y, |s| (s.stream, s.native)) {
++        Some((x, y)) => {
++            let mut evt = evt.clone();
++            evt.x = x;
++            evt.y = y;
++            Cow::Owned(evt)
++        }
++        None => Cow::Borrowed(evt),
++    }
++}
++
++/// A desktop cursor position, moved into the scaled display the viewers see.
++pub fn to_stream_pos(x: i32, y: i32) -> (i32, i32) {
++    map_point(x, y, |s| (s.native, s.stream)).unwrap_or((x, y))
++}
++
++fn map_point(
++    x: i32,
++    y: i32,
++    sizes: impl Fn(&Scaled) -> ((usize, usize), (usize, usize)),
++) -> Option<(i32, i32)> {
++    let scaled = SCALED.lock().unwrap();
++    scaled.values().find_map(|(_, s)| {
++        let ((from_w, from_h), (to_w, to_h)) = sizes(s);
++        let (dx, dy) = ((x - s.origin.0) as i64, (y - s.origin.1) as i64);
++        if dx < 0 || dy < 0 || dx >= from_w as i64 || dy >= from_h as i64 {
++            return None;
++        }
++        Some((
++            s.origin.0 + (dx * to_w as i64 / from_w as i64) as i32,
++            s.origin.1 + (dy * to_h as i64 / from_h as i64) as i32,
++        ))
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn auto(priority: Priority) -> UserStream {
++        let mut s = UserStream::default();
++        s.set_resolution(AUTO);
++        s.priority = priority;
++        s
++    }
++
++    fn feed(s: &mut UserStream, n: u32, avg_delay: u32, fps: u32, now: Instant) {
++        for _ in 0..n {
++            s.on_delay(avg_delay, fps, 60, now);
++        }
++    }
++
++    #[test]
++    fn fps_priority_lowers_resolution_with_cooldown() {
++        let t0 = Instant::now();
++        let mut s = auto(Priority::Fps);
++        feed(&mut s, 3, 300, 20, t0);
++        assert_eq!(s.height(2160), Some(1440));
++        feed(&mut s, 5, 300, 20, t0 + Duration::from_secs(5));
++        assert_eq!(s.height(2160), Some(1440), "no second step inside the cooldown");
++        feed(&mut s, 3, 300, 20, t0 + Duration::from_secs(11));
++        assert_eq!(s.height(2160), Some(1080));
++    }
++
++    #[test]
++    fn resolution_priority_keeps_resolution_until_fps_collapses() {
++        let t0 = Instant::now();
++        let mut s = auto(Priority::Resolution);
++        feed(&mut s, 5, 300, 20, t0);
++        assert_eq!(s.height(2160), None);
++        feed(&mut s, 3, 600, 8, t0);
++        assert_eq!(s.height(2160), Some(1440));
++    }
++
++    #[test]
++    fn healthy_network_restores_native() {
++        let t0 = Instant::now();
++        let mut s = auto(Priority::Fps);
++        feed(&mut s, 3, 300, 20, t0);
++        feed(&mut s, 10, 20, 60, t0 + Duration::from_secs(11));
++        assert_eq!(s.height(2160), None);
++    }
++
++    #[test]
++    fn shared_stream_uses_smallest_height_and_keeps_aspect() {
++        let mut qos = VideoQoS::default();
++        qos.on_connection_open(1);
++        qos.on_connection_open(2);
++        qos.user_stream_resolution(1, 1080);
++        qos.user_stream_resolution(2, 720);
++        assert_eq!(target_size(&qos, (3440, 1440)), Some((1720, 720)));
++        qos.user_stream_resolution(2, NATIVE);
++        assert_eq!(target_size(&qos, (2560, 1440)), Some((1920, 1080)));
++        assert_eq!(target_size(&qos, (1920, 1080)), None, "fixed height not below native");
++    }
++}
+diff --git a/src/server/video_qos.rs b/src/server/video_qos.rs
+index cfb874f..da7f60f 100644
+--- a/src/server/video_qos.rs
++++ b/src/server/video_qos.rs
+@@ -50,7 +50,7 @@ delay:
+ // Constants
+ pub const FPS: u32 = 30;
+ pub const MIN_FPS: u32 = 1;
+-pub const MAX_FPS: u32 = 120;
++pub const MAX_FPS: u32 = 240; // fork: high refresh rate displays (144/165/240 Hz)
+ pub const INIT_FPS: u32 = 15;
+ const MIN_AUTO_FPS: u32 = 5;
+ 
+@@ -266,6 +266,7 @@ struct UserData {
+     delay: UserDelay,
+     record: bool,
+     joined_at: Option<Instant>, // set by on_connection_open; the start-up guard's clock
++    stream: super::stream_scale::UserStream,
+ }
+ 
+ impl UserData {
+@@ -454,6 +455,22 @@ impl VideoQoS {
+         }
+     }
+ 
++    pub fn user_stream_resolution(&mut self, id: i32, resolution: i32) {
++        if let Some(user) = self.users.get_mut(&id) {
++            user.stream.set_resolution(resolution);
++        }
++    }
++
++    pub fn user_stream_priority(&mut self, id: i32, priority: i32) {
++        if let Some(user) = self.users.get_mut(&id) {
++            user.stream.set_priority(priority);
++        }
++    }
++
++    pub fn stream_height(&self, native_h: usize) -> Option<usize> {
++        super::stream_scale::target_height(self.users.values().map(|u| &u.stream), native_h)
++    }
++
+     pub fn user_record(&mut self, id: i32, v: bool) {
+         if let Some(user) = self.users.get_mut(&id) {
+             user.record = v;
+@@ -480,6 +497,7 @@ impl VideoQoS {
+ 
+         let mut adjust_ratio = false;
+         let mut reduce_bitrate = false;
++        let now = self.now();
+         if let Some(user) = self.users.get_mut(&id) {
+             let delay = delay.max(10);
+             // The reply closes the outstanding probe, braked or not.
+@@ -570,6 +588,7 @@ impl VideoQoS {
+             // first network delay message
+             adjust_ratio = user.delay.fps.is_none();
+             user.delay.fps = Some(fps);
++            user.stream.on_delay(avg_delay, fps, user_cap, now);
+             let base = user.delay.rtt_calculator.get_rtt().unwrap_or_default();
+             log::trace!(
+                 "qos_trace t={} id={id} delay={delay} base={base} excess={} avg={avg_delay} bad={} good={} braked={braked} fps={fps} ratio={:.3} reduce_bitrate={reduce_bitrate}",
+diff --git a/src/server/video_service.rs b/src/server/video_service.rs
+index b07098f..ffef5a9 100644
+--- a/src/server/video_service.rs
++++ b/src/server/video_service.rs
+@@ -655,9 +655,15 @@ fn run(vs: VideoService) -> ResultType<()> {
+         &Config::get_option("allow-auto-record-incoming"),
+     );
+     let client_record = video_qos.record();
++    let stream_size = if vs.source.is_monitor() {
++        super::stream_scale::target_size(&video_qos, (c.width, c.height))
++    } else {
++        None
++    };
+     drop(video_qos);
+     let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
+         &c,
++        stream_size,
+         sp.name(),
+         quality,
+         client_record,
+@@ -678,6 +684,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+             }));
+             setup_encoder(
+                 &c,
++                stream_size,
+                 sp.name(),
+                 quality,
+                 client_record,
+@@ -697,6 +704,14 @@ fn run(vs: VideoService) -> ResultType<()> {
+             bail!(e);
+         }
+     }
++    if vs.source.is_monitor() {
++        let native = (c.width, c.height);
++        if let Some(msg) =
++            super::stream_scale::update_display(&sp.name(), display_idx, c.origin, native, stream_size)
++        {
++            sp.send_shared(Arc::new(msg));
++        }
++    }
+     VIDEO_QOS.lock().unwrap().store_bitrate(encoder.bitrate());
+     VIDEO_QOS
+         .lock()
+@@ -723,12 +738,12 @@ fn run(vs: VideoService) -> ResultType<()> {
+     let mut would_block_count = 0u32;
+     let mut yuv = Vec::new();
+     let mut mid_data = Vec::new();
++    let mut scaled = Vec::new();
+     let mut repeat_encode_counter = 0;
+     let repeat_encode_max = 10;
+     let mut encode_fail_counter = 0;
+     let mut first_frame = true;
+-    let capture_width = c.width;
+-    let capture_height = c.height;
++    let (capture_width, capture_height) = stream_size.unwrap_or((c.width, c.height));
+     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+ 
+     while sp.ok() {
+@@ -743,6 +758,13 @@ fn run(vs: VideoService) -> ResultType<()> {
+             &mut second_instant,
+             &sp.name(),
+         )?;
++        if vs.source.is_monitor()
++            && super::stream_scale::target_size(&VIDEO_QOS.lock().unwrap(), (c.width, c.height))
++                != stream_size
++        {
++            log::info!("switch due to stream resolution changed");
++            bail!("SWITCH");
++        }
+         if sp.is_option_true(OPTION_REFRESH) {
+             if vs.source.is_monitor() {
+                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
+@@ -847,6 +869,7 @@ fn run(vs: VideoService) -> ResultType<()> {
+                         }
+                     }
+ 
++                    let frame = super::stream_scale::scale_frame(frame, stream_size, &mut scaled)?;
+                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                     let send_conn_ids = handle_one_frame(
+                         display_idx,
+@@ -1032,6 +1055,7 @@ impl Drop for Raii {
+ 
+ fn setup_encoder(
+     c: &CapturerInfo,
++    stream_size: Option<(usize, usize)>,
+     name: String,
+     quality: f32,
+     client_record: bool,
+@@ -1054,6 +1078,10 @@ fn setup_encoder(
+         last_portable_service_running,
+         source,
+     );
++    let encoder_cfg = match stream_size {
++        Some(size) => super::stream_scale::rescale_config(encoder_cfg, size),
++        None => encoder_cfg,
++    };
+     Encoder::set_fallback(&encoder_cfg);
+     let codec_format = Encoder::negotiated_codec();
+     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
+@@ -1247,6 +1275,9 @@ fn handle_one_frame(
+     height: usize,
+ ) -> ResultType<HashSet<i32>> {
+     sp.snapshot(|sps| {
++        if let Some(msg) = super::stream_scale::scaled_display_msg(&sp.name()) {
++            sps.send_shared(Arc::new(msg));
++        }
+         // so that new sub and old sub share the same encoder after switch
+         if sps.has_subscribes() {
+             log::info!("switch due to new subscriber");
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index f28752e..4bdec80 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -510,6 +510,11 @@ impl<T: InvokeUiSession> Session<T> {
+         self.lc.write().unwrap().save_trackpad_speed(trackpad_speed);
+     }
+ 
++    pub fn set_stream_option(&self, key: String, value: i32) {
++        let msg = self.lc.write().unwrap().set_stream_option(&key, value);
++        self.send(Data::Message(msg));
++    }
++
+     pub fn set_custom_fps(&self, custom_fps: i32) {
+         let msg = self.lc.write().unwrap().set_custom_fps(custom_fps, true);
+         self.send(Data::Message(msg));
