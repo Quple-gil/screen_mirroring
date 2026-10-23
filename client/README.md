@@ -15,6 +15,7 @@
 | 缩放时的显示与坐标 | 控制端按"屏幕尺寸"建解码器和纹理，所以传输分辨率变化时，被控端发一条屏幕尺寸变化通知（中途加入的观看者也会补发），并在鼠标坐标、指针位置上做原始尺寸和缩放尺寸的双向换算 | `src/server/stream_scale.rs`、`src/server/video_service.rs`、`src/server/input_service.rs` |
 | 控制端帧率上限 | 原版控制端会按"自定义帧率"（默认 30，最高 120）反复覆盖被控端的帧率；改为跟随"帧率"菜单，上限放宽到 240，仍不超过本机解码能力 | `src/client.rs`、`src/client/io_loop.rs` |
 | 本地鼠标优先 | 被控端的人一动自己的鼠标，就忽略控制方的鼠标操作，停手 0.8 秒后恢复；松开按键的事件始终放行。原版这个功能被禁用了，这里改用低级鼠标钩子区分真实输入和远程注入 | `src/server/local_mouse.rs`、`src/server/input_service.rs` |
+| 一键复制与连接 | 被控端一次性密码旁边的复制按钮，把 ID、一次性密码和 `rustdesk://<ID>?password=<密码>` 链接复制成一段文字。控制端把这段文字粘贴到输入框就直接连接，不用再输密码；装了客户端的也可以直接点链接 | `flutter/lib/common/widgets/connect_invite.dart`、`flutter/lib/desktop/pages/desktop_home_page.dart`、`flutter/lib/desktop/pages/connection_page.dart` |
 | 直连方式默认开启 | 使用内置服务器时，UDP 打洞、IPv6 直连、WebRTC 直连默认开启（原版对自建服务器默认关闭） | `src/common.rs` |
 
 协议新增字段都从 1001 开始编号（`DisplayInfo.refresh_rate`、`OptionMessage.stream_resolution / stream_priority / stream_fps`），

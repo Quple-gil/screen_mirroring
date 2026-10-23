@@ -1,3 +1,50 @@
+diff --git a/flutter/lib/common/widgets/connect_invite.dart b/flutter/lib/common/widgets/connect_invite.dart
+new file mode 100644
+index 0000000..f31e5e4
+--- /dev/null
++++ b/flutter/lib/common/widgets/connect_invite.dart
+@@ -0,0 +1,41 @@
++// fork: one-click connection info. The controlled side copies ID, password and a
++// rustdesk:// link as one text; pasting that text into the remote ID box connects directly.
++import 'package:flutter/services.dart';
++import 'package:flutter_hbb/common.dart';
++import 'package:flutter_hbb/common/formatter/id_formatter.dart';
++
++final _inviteLink = RegExp(r'rustdesk://([0-9A-Za-z_\-]+)(?:\?password=([^\s&]+))?');
++
++class ConnectInvite {
++  final String id;
++  final String? password;
++  ConnectInvite(this.id, this.password);
++}
++
++void copyConnectInvite(String id, String? password) {
++  id = trimID(id);
++  if (id.isEmpty) return;
++  final hasPassword = password != null && password.isNotEmpty;
++  final link = hasPassword
++      ? 'rustdesk://$id?password=${Uri.encodeQueryComponent(password)}'
++      : 'rustdesk://$id';
++  // The link stays on the last line: a single-line text field drops the line
++  // breaks when this is pasted, and the parser needs the password to end the text.
++  final text = [
++    '${translate("ID")}: ${formatID(id)}',
++    if (hasPassword) '${translate("One-time Password")}: $password',
++    translate(
++        'Click the link to connect (RustDesk must be installed), or paste this whole text into the remote ID box'),
++    link,
++  ].join('\n');
++  Clipboard.setData(ClipboardData(text: text));
++  showToast(translate('Copied'));
++}
++
++ConnectInvite? parseConnectInvite(String text) {
++  final m = _inviteLink.firstMatch(text);
++  if (m == null) return null;
++  final password = m.group(2);
++  return ConnectInvite(m.group(1)!,
++      password == null ? null : Uri.decodeQueryComponent(password));
++}
 diff --git a/flutter/lib/common/widgets/toolbar.dart b/flutter/lib/common/widgets/toolbar.dart
 index c3896b0..b4281c7 100644
 --- a/flutter/lib/common/widgets/toolbar.dart
@@ -96,6 +143,95 @@ index c3896b0..b4281c7 100644
  Future<List<TRadioMenu<String>>> toolbarCodec(
      BuildContext context, String id, FFI ffi) async {
    final sessionId = ffi.sessionId;
+diff --git a/flutter/lib/desktop/pages/connection_page.dart b/flutter/lib/desktop/pages/connection_page.dart
+index 1d4928b..d4b3bb3 100644
+--- a/flutter/lib/desktop/pages/connection_page.dart
++++ b/flutter/lib/desktop/pages/connection_page.dart
+@@ -5,6 +5,7 @@ import 'dart:convert';
+ import 'dart:math';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/common/widgets/connect_invite.dart';
+ import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
+ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
+@@ -340,6 +341,19 @@ class _ConnectionPageState extends State<ConnectionPage>
+         isTcpTunneling: isTcpTunneling);
+   }
+ 
++  // fork: pasting the text from copyConnectInvite connects with its password.
++  // Only a paste (several characters at once) counts, so typing a link by hand
++  // does not connect half way through.
++  bool _connectFromInvite(String text, TextEditingController field) {
++    if (text.length - _idController.text.length < 2) return false;
++    final invite = parseConnectInvite(text);
++    if (invite == null) return false;
++    _idController.id = invite.id;
++    field.text = _idController.text;
++    connect(context, invite.id, password: invite.password);
++    return true;
++  }
++
+   /// UI for the remote ID TextField.
+   /// Search for a peer.
+   Widget _buildRemoteIDTextField(BuildContext context) {
+@@ -438,6 +452,8 @@ class _ConnectionPageState extends State<ConnectionPage>
+                           controller: fieldTextEditingController,
+                           inputFormatters: [IDTextInputFormatter()],
+                           onChanged: (v) {
++                            if (_connectFromInvite(
++                                v, fieldTextEditingController)) return;
+                             _idController.id = v;
+                           },
+                           onSubmitted: (_) {
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index 6d370cb..3d4faff 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common.dart';
+ import 'package:flutter_hbb/common/widgets/animated_rotation_widget.dart';
++import 'package:flutter_hbb/common/widgets/connect_invite.dart';
+ import 'package:flutter_hbb/common/widgets/custom_password.dart';
+ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_hbb/desktop/pages/connection_page.dart';
+@@ -357,6 +358,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+                           ),
+                           onHover: (value) => refreshHover.value = value,
+                         ).marginOnly(right: 8, top: 4),
++                      buildCopyInviteButton(model, showOneTime, textColor),
+                       if (!bind.isDisableSettings())
+                         InkWell(
+                           child: Tooltip(
+@@ -386,6 +388,27 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+     );
+   }
+ 
++  // fork: copy ID, one-time password and a rustdesk:// link in one click
++  Widget buildCopyInviteButton(
++      ServerModel model, bool showOneTime, Color? textColor) {
++    RxBool hover = false.obs;
++    return InkWell(
++      child: Tooltip(
++        message: translate('Copy connection info'),
++        child: Obx(
++          () => Icon(
++            Icons.copy,
++            color: hover.value ? textColor : Color(0xFFDDDDDD),
++            size: 20,
++          ).marginOnly(right: 8, top: 4),
++        ),
++      ),
++      onTap: () => copyConnectInvite(
++          model.serverId.text, showOneTime ? model.serverPasswd.text : null),
++      onHover: (value) => hover.value = value,
++    );
++  }
++
+   buildTip(BuildContext context) {
+     final isOutgoingOnly = bind.isOutgoingOnly();
+     return Padding(
 diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
 index 19b3fa9..b270bd7 100644
 --- a/flutter/lib/desktop/widgets/remote_toolbar.dart
@@ -395,10 +531,10 @@ index f9cc2d6..6875e0e 100644
      if let Some(session) = sessions::get_session_by_session_id(&session_id) {
          session.set_custom_fps(fps);
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
-index 1ac1ede..4183e97 100644
+index 1ac1ede..732e022 100644
 --- a/src/lang/cn.rs
 +++ b/src/lang/cn.rs
-@@ -780,6 +780,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+@@ -780,6 +780,16 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
          ("RustDesk could not load a GStreamer component needed for screen capture ({})", "RustDesk 无法加载屏幕捕获所需的 GStreamer 组件 ({})"),
          ("Relay fallback delay in seconds", "回落到中继前的等待时间（秒）"),
          ("relay-fallback-delay-tip", "已经建立的中继连接会等待直连的 WebRTC 多久，超过这个时间就改用中继。调大可以让较慢的直连有更多机会胜出；调小则在无法直连的网络上更快回落到中继。留空表示使用默认值 2.5 秒。"),
@@ -411,14 +547,16 @@ index 1ac1ede..4183e97 100644
 +        ("Native", "原始"),
 +        ("Follow display", "跟随屏幕刷新率"),
 +        ("Prefer frame rate", "优先刷新率（更流畅）"),
-+        ("Prefer resolution", "优先分辨率（更清晰）")
++        ("Prefer resolution", "优先分辨率（更清晰）"),
++        ("Copy connection info", "复制连接信息（ID、密码和连接链接）"),
++        ("Click the link to connect (RustDesk must be installed), or paste this whole text into the remote ID box", "已安装客户端的可以直接点击下面的链接连接；也可以把这整段文字粘贴到“控制远程桌面”的输入框，会自动连接")
      ].iter().cloned().collect();
  }
 diff --git a/src/lang/template.rs b/src/lang/template.rs
-index 968e43b..24d0739 100644
+index 968e43b..7c7b7cb 100644
 --- a/src/lang/template.rs
 +++ b/src/lang/template.rs
-@@ -780,6 +780,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+@@ -780,6 +780,16 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
          ("RustDesk could not load a GStreamer component needed for screen capture ({})", ""),
          ("Relay fallback delay in seconds", ""),
          ("relay-fallback-delay-tip", ""),
@@ -431,7 +569,9 @@ index 968e43b..24d0739 100644
 +        ("Native", ""),
 +        ("Follow display", ""),
 +        ("Prefer frame rate", ""),
-+        ("Prefer resolution", "")
++        ("Prefer resolution", ""),
++        ("Copy connection info", ""),
++        ("Click the link to connect (RustDesk must be installed), or paste this whole text into the remote ID box", "")
      ].iter().cloned().collect();
  }
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
