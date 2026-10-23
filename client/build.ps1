@@ -9,10 +9,15 @@ param(
     [switch]$SkipBridge,
     [switch]$SkipCargo,
     [string]$Tools = "D:\rustdesk-build",
-    # Server baked into the client. Defaults come from client\.env (not committed, see .env.example).
+    # Build the generic client (no built-in server) even if client\.env sets one.
+    [switch]$Generic,
+    # Optional server baked into the client. Defaults come from client\.env (not committed, see .env.example).
+    # Without one the client is generic: the server is set in Settings > Network and survives updates.
     [string]$ServerHost = "",
     [string]$ServerKey = "",
-    [string]$ApiServer = ""
+    [string]$ApiServer = "",
+    # Version used by the update check; defaults to the latest v* tag of this repo.
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
 
@@ -23,10 +28,13 @@ if (Test-Path $clientEnvPath) {
         if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { $clientEnv[$matches[1]] = $matches[2].Trim() }
     }
 }
-if (-not $ServerHost) { $ServerHost = $clientEnv["RD_HOST"] }
-if (-not $ServerKey) { $ServerKey = $clientEnv["RD_KEY"] }
-if (-not $ApiServer) { $ApiServer = $clientEnv["RD_API"] }
-if (-not $ServerHost -or -not $ServerKey) { throw "Set RD_HOST and RD_KEY in client\.env (copy client\.env.example) or pass -ServerHost/-ServerKey" }
+if (-not $Generic) {
+    if (-not $ServerHost) { $ServerHost = $clientEnv["RD_HOST"] }
+    if (-not $ServerKey) { $ServerKey = $clientEnv["RD_KEY"] }
+    if (-not $ApiServer) { $ApiServer = $clientEnv["RD_API"] }
+}
+if ($ServerHost -and -not $ServerKey) { throw "RD_HOST is set but RD_KEY is empty" }
+if ($ServerHost) { Write-Host "==> built-in server $ServerHost" } else { Write-Host "==> generic client (no built-in server)" }
 
 $src = (Resolve-Path (Join-Path $PSScriptRoot "..\rustdesk")).Path
 $release = Join-Path $PSScriptRoot "..\release"
@@ -42,6 +50,9 @@ $env:PUB_HOSTED_URL = "https://pub.flutter-io.cn"
 $env:RD_HOST = $ServerHost
 $env:RD_KEY = $ServerKey
 $env:RD_API = $ApiServer
+if (-not $Version) { $Version = (git -C $PSScriptRoot describe --tags --abbrev=0 --match "v*") -replace '^v', '' }
+$env:SM_VERSION = $Version
+Write-Host "==> version $Version"
 
 function Run([string]$what, [scriptblock]$block) {
     Write-Host "==> $what"

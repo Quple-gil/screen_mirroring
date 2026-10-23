@@ -219,6 +219,14 @@ jobs:
             exit 1
           fi
 
+      - name: Set version
+        shell: bash
+        run: |
+          # 写进客户端的版本号，检查更新时和最新发布的标签比较
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "SM_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
+
       - name: Build rustdesk
         run: |
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
@@ -247,11 +255,11 @@ jobs:
       - name: Build self-extracted executable
         shell: bash
         run: |
-          # 标签触发时用标签做版本号（v1.5.1 → 1.5.1），手动运行时用 RustDesk 的版本号
+          # 客户端检查更新时按 rustdesk-<标签>-x86_64.exe 下载，标签触发时必须用这个文件名
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF_NAME#v}"
+            name="rustdesk-${GITHUB_REF_NAME}-x86_64.exe"
           else
-            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+            name="rustdesk-custom-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)-x86_64.exe"
           fi
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
@@ -259,7 +267,7 @@ jobs:
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
           popd
           mkdir -p ../dist
-          mv ./target/release/rustdesk-portable-packer.exe "../dist/rustdesk-custom-${version}-x86_64.exe"
+          mv ./target/release/rustdesk-portable-packer.exe "../dist/$name"
           (cd ../dist && sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - name: Upload

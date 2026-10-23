@@ -185,7 +185,7 @@ index 1d4928b..d4b3bb3 100644
                            },
                            onSubmitted: (_) {
 diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
-index 6d370cb..3d4faff 100644
+index 6d370cb..dacdd69 100644
 --- a/flutter/lib/desktop/pages/desktop_home_page.dart
 +++ b/flutter/lib/desktop/pages/desktop_home_page.dart
 @@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
@@ -232,6 +232,27 @@ index 6d370cb..3d4faff 100644
    buildTip(BuildContext context) {
      final isOutgoingOnly = bind.isOutgoingOnly();
      return Padding(
+@@ -435,7 +458,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+       final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
+       String btnText = isToUpdate ? 'Update' : 'Download';
+       GestureTapCallback onPressed = () async {
+-        final Uri url = Uri.parse('https://rustdesk.com/download');
++        // fork: updates come from our own release page
++        final Uri url = Uri.parse(updateUrl);
+         await launchUrl(url);
+       };
+       if (isToUpdate) {
+@@ -450,9 +474,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+           onPressed,
+           closeButton: true,
+           help: isToUpdate ? 'Changelog' : null,
+-          link: isToUpdate
+-              ? 'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'
+-              : null);
++          link: isToUpdate ? updateUrl : null);
+     }
+     if (systemError.isNotEmpty) {
+       return buildInstallCard("", systemError, "", () {});
 diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
 index 19b3fa9..b270bd7 100644
 --- a/flutter/lib/desktop/widgets/remote_toolbar.dart
@@ -460,18 +481,35 @@ index fcbc090..a936587 100644
          }
          let inactive_threshold = 15;
 diff --git a/src/common.rs b/src/common.rs
-index 0d46baf..99906d4 100644
+index 0d46baf..2146199 100644
 --- a/src/common.rs
 +++ b/src/common.rs
-@@ -1210,7 +1210,10 @@ pub fn get_local_option(key: &str) -> String {
+@@ -1031,6 +1031,9 @@ pub fn check_software_update() {
+ // Because the url is always `https://api.rustdesk.com/version/latest`.
+ #[tokio::main(flavor = "current_thread")]
+ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
++    if crate::custom_update::ENABLED {
++        return crate::custom_update::check().await;
++    }
+     let (request, url) =
+         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+     let proxy_conf = Config::get_socks();
+@@ -1203,6 +1206,8 @@ pub fn get_webrtc_enabled() -> bool {
+     )
+ }
+ 
++const FORK_DIRECT_PATHS_ON: bool = true;
++
+ pub fn get_local_option(key: &str) -> String {
+     let v = LocalConfig::get_option(key);
+     if key == keys::OPTION_ENABLE_UDP_PUNCH
+@@ -1210,7 +1215,8 @@ pub fn get_local_option(key: &str) -> String {
          || key == keys::OPTION_ENABLE_WEBRTC
      {
          if v.is_empty() {
 -            if !is_public(&Config::get_rendezvous_server()) {
-+            // fork: our own hbbs is up to date, so keep the direct paths on for the built-in server
-+            if !is_public(&Config::get_rendezvous_server())
-+                && crate::custom_server::builtin_custom_server().is_none()
-+            {
++            // fork: the hbbs this project deploys supports these, so keep them on for self-hosted servers
++            if !is_public(&Config::get_rendezvous_server()) && !FORK_DIRECT_PATHS_ON {
                  return "N".to_owned();
              }
          }
@@ -501,6 +539,119 @@ index 3a7d60f..6cc42d4 100644
  fn get_custom_server_from_config_string(s: &str) -> ResultType<CustomServer> {
      let tmp: String = s.chars().rev().collect();
      const PK: &[u8; 32] = &[
+diff --git a/src/custom_update.rs b/src/custom_update.rs
+new file mode 100644
+index 0000000..dffde7d
+--- /dev/null
++++ b/src/custom_update.rs
+@@ -0,0 +1,107 @@
++//! fork: software updates come from this project's GitHub releases instead of
++//! rustdesk.com, so the client never offers the official build (which lacks the
++//! fork's changes and its server settings) as an update.
++//!
++//! The release page URL is stored in `SOFTWARE_UPDATE_URL` exactly like the
++//! upstream check does, so the existing update card, in-app download and
++//! auto-update keep working. They derive the file name from the tag
++//! (`rustdesk-<tag>-x86_64.exe`), which is how the release workflow names it.
++use crate::{
++    common::SOFTWARE_UPDATE_URL,
++    hbbs_http::{create_http_client_async, get_url_for_tls},
++};
++use hbb_common::{
++    config::Config,
++    get_version_number,
++    tls::{get_cached_tls_type, upsert_tls_cache, TlsType},
++    ResultType,
++};
++
++pub const ENABLED: bool = true;
++
++const REPO: &str = match option_env!("SM_UPDATE_REPO") {
++    Some(repo) => repo,
++    None => "Quple-gil/screen_mirroring",
++};
++
++/// The fork's own version, taken from the release tag at build time (`SM_VERSION`).
++pub fn version() -> &'static str {
++    match option_env!("SM_VERSION") {
++        Some(v) if !v.is_empty() => v,
++        _ => crate::VERSION,
++    }
++}
++
++#[derive(serde::Deserialize)]
++struct Release {
++    tag_name: String,
++    html_url: String,
++}
++
++pub async fn check() -> ResultType<()> {
++    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
++    let proxy_conf = Config::get_socks();
++    let tls_url = get_url_for_tls(&url, &proxy_conf);
++    let cached = get_cached_tls_type(tls_url);
++    let mut tls_types = vec![cached.unwrap_or(TlsType::Rustls)];
++    if cached.is_none() {
++        tls_types.push(TlsType::NativeTls);
++    }
++    let mut last_err = None;
++    let mut resp = None;
++    for tls_type in tls_types {
++        match create_http_client_async(tls_type, false)
++            .get(&url)
++            .header(reqwest::header::USER_AGENT, "rustdesk-custom-update")
++            .send()
++            .await
++        {
++            Ok(r) => {
++                upsert_tls_cache(tls_url, tls_type, false);
++                resp = Some(r);
++                break;
++            }
++            Err(e) => last_err = Some(e),
++        }
++    }
++    let resp = match (resp, last_err) {
++        (Some(r), _) => r,
++        (None, Some(e)) => return Err(e.into()),
++        (None, None) => hbb_common::bail!("no request sent"),
++    };
++    let bytes = resp.error_for_status()?.bytes().await?;
++    let release: Release = serde_json::from_slice(&bytes)?;
++    let latest = release.tag_name.trim_start_matches('v');
++    if is_newer(latest, version()) {
++        #[cfg(feature = "flutter")]
++        {
++            let mut m = std::collections::HashMap::new();
++            m.insert("name", "check_software_update_finish");
++            m.insert("url", &release.html_url);
++            if let Ok(data) = serde_json::to_string(&m) {
++                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
++            }
++        }
++        *SOFTWARE_UPDATE_URL.lock().unwrap() = release.html_url;
++    } else {
++        *SOFTWARE_UPDATE_URL.lock().unwrap() = "".to_owned();
++    }
++    Ok(())
++}
++
++fn is_newer(latest: &str, current: &str) -> bool {
++    get_version_number(latest) > get_version_number(current)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn compares_release_tags() {
++        assert!(is_newer("1.5.2", "1.5.1"));
++        assert!(is_newer("1.6.0", "1.5.10"));
++        assert!(!is_newer("1.5.1", "1.5.1"));
++        assert!(!is_newer("1.5.0", "1.5.1"));
++    }
++}
 diff --git a/src/flutter.rs b/src/flutter.rs
 index 35fa8cc..cd2066d 100644
 --- a/src/flutter.rs
@@ -574,6 +725,18 @@ index 968e43b..7c7b7cb 100644
 +        ("Click the link to connect (RustDesk must be installed), or paste this whole text into the remote ID box", "")
      ].iter().cloned().collect();
  }
+diff --git a/src/lib.rs b/src/lib.rs
+index 649f3ef..2896720 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -44,6 +44,7 @@ mod clipboard;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub mod core_main;
+ mod custom_server;
++mod custom_update;
+ mod lang;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ mod port_forward;
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
 index a3c3d68..57147d5 100644
 --- a/src/platform/windows.rs
