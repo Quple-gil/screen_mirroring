@@ -16,7 +16,9 @@
 | 控制端帧率上限 | 原版控制端会按"自定义帧率"（默认 30，最高 120）反复覆盖被控端的帧率；改为跟随"帧率"菜单，上限放宽到 240，仍不超过本机解码能力 | `src/client.rs`、`src/client/io_loop.rs` |
 | 本地鼠标优先 | 被控端的人一动自己的鼠标，就忽略控制方的鼠标操作，停手 0.8 秒后恢复；松开按键的事件始终放行。原版这个功能被禁用了，这里改用低级鼠标钩子区分真实输入和远程注入 | `src/server/local_mouse.rs`、`src/server/input_service.rs` |
 | 一键复制与连接 | 被控端一次性密码旁边的复制按钮，把 ID、一次性密码和 `rustdesk://<ID>?password=<密码>` 链接复制成一段文字。控制端把这段文字粘贴到输入框就直接连接，不用再输密码；装了客户端的也可以直接点链接 | `flutter/lib/common/widgets/connect_invite.dart`、`flutter/lib/desktop/pages/desktop_home_page.dart`、`flutter/lib/desktop/pages/connection_page.dart` |
-| 检查更新 | 更新源从 rustdesk.com 换成本仓库的 GitHub Releases（最新发布的标签和编译时写入的 `SM_VERSION` 比较），沿用原版的更新提示、一键更新和“自动更新”开关。下载文件名为 `rustdesk-<标签>-x86_64.exe`，由发布流水线生成 | `src/custom_update.rs`、`src/common.rs` |
+| 检查更新 | 更新源从 rustdesk.com 换成本仓库的 GitHub Releases（最新发布的标签和编译时写入的 `SM_VERSION` 比较），沿用原版的更新提示、一键更新和“自动更新”开关。下载文件名为 `rustdesk-<标签>-x86_64.exe`，由发布流水线生成。原版只允许从 rustdesk/rustdesk 下载更新，这里加上本仓库 | `src/custom_update.rs`、`src/common.rs`、`src/updater.rs` |
+| 便携版就地更新 | 单文件 exe 启动时把自己的完整路径传给程序（`RUSTDESK_PORTABLE_EXE`）。便携版的“更新”按钮在程序里下载新版本，覆盖这个 exe，结束同目录启动的进程后重新打开它，不再跳转浏览器 | `libs/portable/src/main.rs`、`src/custom_update.rs`、`src/flutter_ffi.rs`、`flutter/lib/desktop/pages/desktop_home_page.dart` |
+| 更新走系统代理 | 原版的网络请求只用 RustDesk 自己设置的代理。检查更新和下载在没有设置时改用 Windows 系统代理（没有系统代理则直连），其他连接不受影响 | `src/custom_update.rs`、`src/hbbs_http/downloader.rs` |
 | 直连方式默认开启 | UDP 打洞、IPv6 直连、WebRTC 直连默认开启（原版对自建服务器默认关闭，在设置里手动关闭仍然有效） | `src/common.rs` |
 
 协议新增字段都从 1001 开始编号（`DisplayInfo.refresh_rate`、`OptionMessage.stream_resolution / stream_priority / stream_fps`），

@@ -185,7 +185,7 @@ index 1d4928b..d4b3bb3 100644
                            },
                            onSubmitted: (_) {
 diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
-index 6d370cb..dacdd69 100644
+index 6d370cb..5f1dec9 100644
 --- a/flutter/lib/desktop/pages/desktop_home_page.dart
 +++ b/flutter/lib/desktop/pages/desktop_home_page.dart
 @@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
@@ -232,8 +232,15 @@ index 6d370cb..dacdd69 100644
    buildTip(BuildContext context) {
      final isOutgoingOnly = bind.isOutgoingOnly();
      return Padding(
-@@ -435,7 +458,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
-       final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
+@@ -432,10 +455,14 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+         updateUrl.isNotEmpty &&
+         !isCardClosed &&
+         bind.mainUriPrefixSync().contains('rustdesk')) {
+-      final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
++      // fork: a portable copy also updates in place (downloads and overwrites its exe)
++      final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled() ||
++          isWindows &&
++              bind.mainGetCommonSync(key: 'fork-portable-update') == 'Y';
        String btnText = isToUpdate ? 'Update' : 'Download';
        GestureTapCallback onPressed = () async {
 -        final Uri url = Uri.parse('https://rustdesk.com/download');
@@ -242,7 +249,7 @@ index 6d370cb..dacdd69 100644
          await launchUrl(url);
        };
        if (isToUpdate) {
-@@ -450,9 +474,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+@@ -450,9 +477,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
            onPressed,
            closeButton: true,
            help: isToUpdate ? 'Changelog' : null,
@@ -353,6 +360,27 @@ index 991e8a3..6a95a47 100644
  }
  
  message TestDelay {
+diff --git a/libs/portable/src/main.rs b/libs/portable/src/main.rs
+index 284dd5e..1e7a2f4 100644
+--- a/libs/portable/src/main.rs
++++ b/libs/portable/src/main.rs
+@@ -20,6 +20,8 @@ const META_LINE_PREFIX_TIMESTAMP: &str = "timestamp = ";
+ const META_LINE_PREFIX_FILE: &str = "file = ";
+ const APP_PREFIX: &str = "rustdesk";
+ const APPNAME_RUNTIME_ENV_KEY: &str = "RUSTDESK_APPNAME";
++// fork: lets the portable app update by overwriting this exe
++const PORTABLE_EXE_ENV_KEY: &str = "RUSTDESK_PORTABLE_EXE";
+ #[cfg(windows)]
+ const SET_FOREGROUND_WINDOW_ENV_KEY: &str = "SET_FOREGROUND_WINDOW";
+ 
+@@ -245,6 +247,7 @@ fn execute(path: PathBuf, args: Vec<String>, _ui: bool) {
+     }
+ 
+     cmd.env(APPNAME_RUNTIME_ENV_KEY, exe_name);
++    cmd.env(PORTABLE_EXE_ENV_KEY, &exe);
+     if use_null_stdio() {
+         cmd.stdin(Stdio::null())
+             .stdout(Stdio::null())
 diff --git a/libs/scrap/src/bindings/yuv_ffi.h b/libs/scrap/src/bindings/yuv_ffi.h
 index 1ea24ef..53c7b62 100644
 --- a/libs/scrap/src/bindings/yuv_ffi.h
@@ -541,10 +569,10 @@ index 3a7d60f..6cc42d4 100644
      const PK: &[u8; 32] = &[
 diff --git a/src/custom_update.rs b/src/custom_update.rs
 new file mode 100644
-index 0000000..dffde7d
+index 0000000..25ba5ec
 --- /dev/null
 +++ b/src/custom_update.rs
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,206 @@
 +//! fork: software updates come from this project's GitHub releases instead of
 +//! rustdesk.com, so the client never offers the official build (which lacks the
 +//! fork's changes and its server settings) as an update.
@@ -553,16 +581,8 @@ index 0000000..dffde7d
 +//! upstream check does, so the existing update card, in-app download and
 +//! auto-update keep working. They derive the file name from the tag
 +//! (`rustdesk-<tag>-x86_64.exe`), which is how the release workflow names it.
-+use crate::{
-+    common::SOFTWARE_UPDATE_URL,
-+    hbbs_http::{create_http_client_async, get_url_for_tls},
-+};
-+use hbb_common::{
-+    config::Config,
-+    get_version_number,
-+    tls::{get_cached_tls_type, upsert_tls_cache, TlsType},
-+    ResultType,
-+};
++use crate::{common::SOFTWARE_UPDATE_URL, hbbs_http::create_http_client_async_with_url_strict};
++use hbb_common::{config::Config, get_version_number, log, ResultType};
 +
 +pub const ENABLED: bool = true;
 +
@@ -570,6 +590,58 @@ index 0000000..dffde7d
 +    Some(repo) => repo,
 +    None => "Quple-gil/screen_mirroring",
 +};
++
++/// Update downloads are only accepted from the official repo and this one (see updater.rs).
++pub fn is_release_repo(owner: &str, repo: &str) -> bool {
++    REPO.split_once('/') == Some((owner, repo))
++}
++
++/// Client for update checks and downloads. RustDesk ignores the system proxy and
++/// only uses its own proxy setting; GitHub is often unreachable without a proxy,
++/// so when no RustDesk proxy is set, update traffic follows the system proxy
++/// (Windows Internet settings), and goes direct when there is none.
++pub async fn http_client(url: &str) -> ResultType<reqwest::Client> {
++    if Config::get_socks().is_some() {
++        return create_http_client_async_with_url_strict(url).await;
++    }
++    let mut builder = reqwest::Client::builder().use_native_tls();
++    #[cfg(windows)]
++    if let Some(proxy) = windows_system_proxy() {
++        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
++    }
++    Ok(builder.build()?)
++}
++
++#[cfg(windows)]
++fn windows_system_proxy() -> Option<String> {
++    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
++    let key = RegKey::predef(HKEY_CURRENT_USER)
++        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
++        .ok()?;
++    if key.get_value::<u32, _>("ProxyEnable").ok()? == 0 {
++        return None;
++    }
++    let server: String = key.get_value("ProxyServer").ok()?;
++    parse_proxy_server(&server)
++}
++
++/// `ProxyServer` is either `host:port` or per protocol, e.g. `http=host:port;https=host:port`.
++fn parse_proxy_server(server: &str) -> Option<String> {
++    let addr = if server.contains('=') {
++        let entry = |scheme: &str| {
++            server
++                .split(';')
++                .find_map(|p| p.trim().strip_prefix(scheme).map(str::to_owned))
++        };
++        entry("https=").or_else(|| entry("http="))?
++    } else {
++        server.trim().to_owned()
++    };
++    if addr.is_empty() {
++        return None;
++    }
++    Some(if addr.contains("://") { addr } else { format!("http://{addr}") })
++}
 +
 +/// The fork's own version, taken from the release tag at build time (`SM_VERSION`).
 +pub fn version() -> &'static str {
@@ -587,35 +659,12 @@ index 0000000..dffde7d
 +
 +pub async fn check() -> ResultType<()> {
 +    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-+    let proxy_conf = Config::get_socks();
-+    let tls_url = get_url_for_tls(&url, &proxy_conf);
-+    let cached = get_cached_tls_type(tls_url);
-+    let mut tls_types = vec![cached.unwrap_or(TlsType::Rustls)];
-+    if cached.is_none() {
-+        tls_types.push(TlsType::NativeTls);
-+    }
-+    let mut last_err = None;
-+    let mut resp = None;
-+    for tls_type in tls_types {
-+        match create_http_client_async(tls_type, false)
-+            .get(&url)
-+            .header(reqwest::header::USER_AGENT, "rustdesk-custom-update")
-+            .send()
-+            .await
-+        {
-+            Ok(r) => {
-+                upsert_tls_cache(tls_url, tls_type, false);
-+                resp = Some(r);
-+                break;
-+            }
-+            Err(e) => last_err = Some(e),
-+        }
-+    }
-+    let resp = match (resp, last_err) {
-+        (Some(r), _) => r,
-+        (None, Some(e)) => return Err(e.into()),
-+        (None, None) => hbb_common::bail!("no request sent"),
-+    };
++    let resp = http_client(&url)
++        .await?
++        .get(&url)
++        .header(reqwest::header::USER_AGENT, "rustdesk-custom-update")
++        .send()
++        .await?;
 +    let bytes = resp.error_for_status()?.bytes().await?;
 +    let release: Release = serde_json::from_slice(&bytes)?;
 +    let latest = release.tag_name.trim_start_matches('v');
@@ -636,6 +685,54 @@ index 0000000..dffde7d
 +    Ok(())
 +}
 +
++/// The single-file exe a portable copy was started from (passed on by the packer),
++/// or `None` when installed or when the packer did not pass it.
++#[cfg(windows)]
++pub fn portable_exe() -> Option<std::path::PathBuf> {
++    if crate::platform::is_installed() {
++        return None;
++    }
++    let path = std::path::PathBuf::from(std::env::var_os("RUSTDESK_PORTABLE_EXE")?);
++    path.is_file().then_some(path)
++}
++
++/// A portable copy updates by overwriting the exe it was started from with the
++/// downloaded one and starting it again once this process has exited, instead of
++/// installing. Returns `None` when this is not a portable copy.
++#[cfg(windows)]
++pub fn update_portable(new_exe: &std::path::Path) -> Option<ResultType<()>> {
++    let target = portable_exe()?;
++    Some(replace_and_restart(new_exe, &target))
++}
++
++#[cfg(windows)]
++fn replace_and_restart(new_exe: &std::path::Path, target: &std::path::Path) -> ResultType<()> {
++    use std::os::windows::process::CommandExt;
++    std::fs::copy(new_exe, target)?;
++    std::fs::remove_file(new_exe).ok();
++    // The packer re-extracts into the folder this copy runs from, so every process
++    // started from it (e.g. the --cm window) has to be gone before it starts.
++    let me = std::process::id();
++    let current = std::env::current_exe()?;
++    let mut sys = hbb_common::sysinfo::System::new();
++    sys.refresh_processes();
++    for (pid, p) in sys.processes() {
++        if pid.as_u32() != me && p.exe() == current.as_path() {
++            p.kill();
++        }
++    }
++    let script = format!(
++        "Wait-Process -Id {me} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}'",
++        target.display().to_string().replace('\'', "''")
++    );
++    std::process::Command::new("powershell")
++        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
++        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
++        .spawn()?;
++    log::info!("Portable copy {} updated, restarting", target.display());
++    std::process::exit(0);
++}
++
 +fn is_newer(latest: &str, current: &str) -> bool {
 +    get_version_number(latest) > get_version_number(current)
 +}
@@ -651,6 +748,36 @@ index 0000000..dffde7d
 +        assert!(!is_newer("1.5.1", "1.5.1"));
 +        assert!(!is_newer("1.5.0", "1.5.1"));
 +    }
++
++    #[test]
++    fn reads_windows_proxy_server_setting() {
++        assert_eq!(parse_proxy_server("127.0.0.1:7897").as_deref(), Some("http://127.0.0.1:7897"));
++        assert_eq!(
++            parse_proxy_server("http=127.0.0.1:8080;https=127.0.0.1:8443").as_deref(),
++            Some("http://127.0.0.1:8443")
++        );
++        assert_eq!(
++            parse_proxy_server("socks=127.0.0.1:1080;http=127.0.0.1:8080").as_deref(),
++            Some("http://127.0.0.1:8080")
++        );
++        assert_eq!(parse_proxy_server("socks=127.0.0.1:1080"), None);
++        assert_eq!(parse_proxy_server(""), None);
++    }
++
++    #[test]
++    fn accepts_downloads_from_own_releases() {
++        let file = crate::updater::get_download_file_from_url(&format!(
++            "https://github.com/{REPO}/releases/download/v1.5.2/rustdesk-v1.5.2-x86_64.exe"
++        ));
++        assert_eq!(
++            file.and_then(|f| f.file_name().map(|n| n.to_owned())),
++            Some("rustdesk-v1.5.2-x86_64.exe".into())
++        );
++        assert!(crate::updater::get_download_file_from_url(
++            "https://github.com/someone/else/releases/download/v1.5.2/rustdesk-v1.5.2-x86_64.exe"
++        )
++        .is_none());
++    }
 +}
 diff --git a/src/flutter.rs b/src/flutter.rs
 index 35fa8cc..cd2066d 100644
@@ -665,7 +792,7 @@ index 35fa8cc..cd2066d 100644
                  h.insert("original_width", original_resolution.width);
                  h.insert("original_height", original_resolution.height);
 diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
-index f9cc2d6..6875e0e 100644
+index f9cc2d6..ee9712b 100644
 --- a/src/flutter_ffi.rs
 +++ b/src/flutter_ffi.rs
 @@ -570,6 +570,12 @@ pub fn session_set_custom_image_quality(session_id: SessionID, value: i32) {
@@ -681,6 +808,59 @@ index f9cc2d6..6875e0e 100644
  pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
      if let Some(session) = sessions::get_session_by_session_id(&session_id) {
          session.set_custom_fps(fps);
+@@ -2677,6 +2683,19 @@ pub fn main_get_printer_names() -> SyncReturn<String> {
+ }
+ 
+ pub fn main_get_common(key: String) -> String {
++    #[cfg(target_os = "windows")]
++    if key == "fork-portable-update" {
++        return if crate::custom_update::portable_exe().is_some() { "Y" } else { "" }.to_owned();
++    }
++    // fork: a portable copy is never an MSI install (that check fails when nothing is installed)
++    #[cfg(target_os = "windows")]
++    if let Some(version) = key.strip_prefix("download-file-") {
++        if crate::custom_update::portable_exe().is_some() {
++            if let Some(arch) = crate::platform::windows::release_arch_suffix() {
++                return format!("rustdesk-{version}-{arch}.exe");
++            }
++        }
++    }
+     if key == "is-printer-installed" {
+         #[cfg(target_os = "windows")]
+         {
+@@ -2839,6 +2858,14 @@ pub fn main_set_common(_key: String, _value: String) {
+                     new_version_file.to_str()
+                 );
+                 if let Some(f) = new_version_file.to_str() {
++                    #[cfg(target_os = "windows")]
++                    if let Some(res) = crate::custom_update::update_portable(&new_version_file) {
++                        if let Err(e) = res {
++                            log::error!("Failed to update the portable copy: {}", e);
++                            fs::remove_file(f).ok();
++                        }
++                        return;
++                    }
+                     // 1.4.0 does not support "--update"
+                     // But we can assume that the new version supports it.
+ 
+diff --git a/src/hbbs_http/downloader.rs b/src/hbbs_http/downloader.rs
+index a4fd1fa..3ef3c14 100644
+--- a/src/hbbs_http/downloader.rs
++++ b/src/hbbs_http/downloader.rs
+@@ -1,4 +1,3 @@
+-use super::create_http_client_async_with_url_strict;
+ use hbb_common::{
+     bail,
+     lazy_static::lazy_static,
+@@ -167,7 +166,7 @@ async fn do_download(
+     auto_del_dur: Option<Duration>,
+     mut rx_cancel: UnboundedReceiver<()>,
+ ) -> ResultType<bool> {
+-    let client = create_http_client_async_with_url_strict(&url).await?;
++    let client = crate::custom_update::http_client(&url).await?;
+ 
+     let mut is_all_downloaded = false;
+     tokio::select! {
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
 index 1ac1ede..732e022 100644
 --- a/src/lang/cn.rs
@@ -1585,3 +1765,18 @@ index f28752e..4bdec80 100644
      pub fn set_custom_fps(&self, custom_fps: i32) {
          let msg = self.lc.write().unwrap().set_custom_fps(custom_fps, true);
          self.send(Data::Message(msg));
+diff --git a/src/updater.rs b/src/updater.rs
+index 0c17840..b8e37ab 100644
+--- a/src/updater.rs
++++ b/src/updater.rs
+@@ -376,8 +376,8 @@ pub fn get_update_download_file_from_url(url: &str) -> Option<PathBuf> {
+     let tag = segments.next()?;
+     let filename = segments.next()?;
+ 
+-    if owner != "rustdesk"
+-        || repo != "rustdesk"
++    if !(owner == "rustdesk" && repo == "rustdesk"
++        || crate::custom_update::is_release_repo(owner, repo))
+         || releases != "releases"
+         || download != "download"
+         || tag.is_empty()
